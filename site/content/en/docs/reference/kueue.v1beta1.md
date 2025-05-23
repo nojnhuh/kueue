@@ -1042,6 +1042,40 @@ subdomain in DNS (RFC 1123).</p>
 
 
 
+## `DynamicResourceMapping`     {#kueue-x-k8s-io-v1beta1-DynamicResourceMapping}
+    
+
+**Appears in:**
+
+- [ResourceFlavorSpec](#kueue-x-k8s-io-v1beta1-ResourceFlavorSpec)
+
+
+<p>DynamicResourceMapping defines mapping for Dynamic Resource Allocation resources</p>
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>name</code> <B>[Required]</B><br/>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcename-v1-core"><code>k8s.io/api/core/v1.ResourceName</code></a>
+</td>
+<td>
+   <p>name of this resource</p>
+</td>
+</tr>
+<tr><td><code>deviceClassNames</code> <B>[Required]</B><br/>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcename-v1-core"><code>[]k8s.io/api/core/v1.ResourceName</code></a>
+</td>
+<td>
+   <p>deviceClassNames lists the names of all the device classes that will count against
+the quota defined in this resource</p>
+</td>
+</tr>
+</tbody>
+</table>
+
 ## `FairSharing`     {#kueue-x-k8s-io-v1beta1-FairSharing}
     
 
@@ -2258,6 +2292,13 @@ cloud.provider.com/preemptible=&quot;true&quot;:NoSchedule</p>
    <p>topologyName indicates topology for the TAS ResourceFlavor.
 When specified, it enables scraping of the topology information from the
 nodes matching to the Resource Flavor node labels.</p>
+</td>
+</tr>
+<tr><td><code>dynamicResources</code><br/>
+<a href="#kueue-x-k8s-io-v1beta1-DynamicResourceMapping"><code>[]DynamicResourceMapping</code></a>
+</td>
+<td>
+   <p>dynamicResources defines Kubernetes Dynamic Resource Allocation resources</p>
 </td>
 </tr>
 </tbody>

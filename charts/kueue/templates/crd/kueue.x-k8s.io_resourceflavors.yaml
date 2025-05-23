@@ -58,6 +58,33 @@ spec:
           spec:
             description: ResourceFlavorSpec defines the desired state of the ResourceFlavor
             properties:
+              dynamicResources:
+                description: dynamicResources defines Kubernetes Dynamic Resource
+                  Allocation resources
+                items:
+                  description: DynamicResourceMapping defines mapping for Dynamic
+                    Resource Allocation resources
+                  properties:
+                    deviceClassNames:
+                      description: |-
+                        deviceClassNames lists the names of all the device classes that will count against
+                        the quota defined in this resource
+                      items:
+                        description: ResourceName is the name identifying various
+                          resources in a ResourceList.
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    name:
+                      description: name of this resource
+                      type: string
+                  required:
+                  - deviceClassNames
+                  - name
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-type: atomic
               nodeLabels:
                 additionalProperties:
                   type: string

@@ -17,6 +17,7 @@ controllerManager:
       repository: us-central1-docker.pkg.dev/k8s-staging-images/kueue/kueue
       # This should be set to 'IfNotPresent' for released version      
       pullPolicy: Always
+      tag: main
     podAnnotations: {}
     resources:
       limits:
@@ -161,3 +162,8 @@ metrics:
   serviceMonitor:
     tlsConfig:
       insecureSkipVerify: true
+KueueViz:
+  backend:
+    image: us-central1-docker.pkg.dev/k8s-staging-images/kueue/kueueviz-backend:main
+  frontend:
+    image: us-central1-docker.pkg.dev/k8s-staging-images/kueue/kueueviz-frontend:main

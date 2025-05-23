@@ -25,10 +25,11 @@ import (
 // ResourceFlavorSpecApplyConfiguration represents a declarative configuration of the ResourceFlavorSpec type for use
 // with apply.
 type ResourceFlavorSpecApplyConfiguration struct {
-	NodeLabels   map[string]string                 `json:"nodeLabels,omitempty"`
-	NodeTaints   []v1.TaintApplyConfiguration      `json:"nodeTaints,omitempty"`
-	Tolerations  []v1.TolerationApplyConfiguration `json:"tolerations,omitempty"`
-	TopologyName *kueuev1beta1.TopologyReference   `json:"topologyName,omitempty"`
+	NodeLabels       map[string]string                          `json:"nodeLabels,omitempty"`
+	NodeTaints       []v1.TaintApplyConfiguration               `json:"nodeTaints,omitempty"`
+	Tolerations      []v1.TolerationApplyConfiguration          `json:"tolerations,omitempty"`
+	TopologyName     *kueuev1beta1.TopologyReference            `json:"topologyName,omitempty"`
+	DynamicResources []DynamicResourceMappingApplyConfiguration `json:"dynamicResources,omitempty"`
 }
 
 // ResourceFlavorSpecApplyConfiguration constructs a declarative configuration of the ResourceFlavorSpec type for use with
@@ -82,5 +83,18 @@ func (b *ResourceFlavorSpecApplyConfiguration) WithTolerations(values ...*v1.Tol
 // If called multiple times, the TopologyName field is set to the value of the last call.
 func (b *ResourceFlavorSpecApplyConfiguration) WithTopologyName(value kueuev1beta1.TopologyReference) *ResourceFlavorSpecApplyConfiguration {
 	b.TopologyName = &value
+	return b
+}
+
+// WithDynamicResources adds the given value to the DynamicResources field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the DynamicResources field.
+func (b *ResourceFlavorSpecApplyConfiguration) WithDynamicResources(values ...*DynamicResourceMappingApplyConfiguration) *ResourceFlavorSpecApplyConfiguration {
+	for i := range values {
+		if values[i] == nil {
+			panic("nil value passed to WithDynamicResources")
+		}
+		b.DynamicResources = append(b.DynamicResources, *values[i])
+	}
 	return b
 }
