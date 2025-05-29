@@ -285,8 +285,10 @@ spec:
 | `WorkloadResourceRequestsSummary`     | `false` | Alpha      | 0.9   | 0.9   |
 | `WorkloadResourceRequestsSummary`     | `true`  | Beta       | 0.10  | 0.10  |
 | `ManagedJobsNamespaceSelector`        | `true`  | Beta       | 0.10  |       |
-| `LocalQueueDefaulting`                | `false` | Alpha      | 0.10  |       |
+| `LocalQueueDefaulting`                | `false` | Alpha      | 0.10  | 0.11  |
+| `LocalQueueDefaulting`                | `true`  | Beta       | 0.12  |       |
 | `LocalQueueMetrics`                   | `false` | Alpha      | 0.10  |       |
+| `ObjectRetentionPolicies`             | `false` | Alpha      | 0.12  |       |
 
 ### Feature gates for graduated or deprecated features
 

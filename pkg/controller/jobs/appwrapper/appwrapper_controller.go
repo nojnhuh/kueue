@@ -67,7 +67,7 @@ func init() {
 }
 
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;watch;update
-// +kubebuilder:rbac:groups=workload.codeflare.dev,resources=appwrappers,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=workload.codeflare.dev,resources=appwrappers,verbs=get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=workload.codeflare.dev,resources=appwrappers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloads,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloads/status,verbs=get;update;patch
@@ -147,12 +147,9 @@ func (j *AppWrapper) PodSets() ([]kueue.PodSet, error) {
 			Count:    awutils.Replicas(awPodSets[psIndex]),
 		}
 		if features.Enabled(features.TopologyAwareScheduling) {
-			podSets[psIndex].TopologyRequest = jobframework.PodSetTopologyRequest(
-				&(podSpecTemplates[psIndex].ObjectMeta),
-				podIndexLabel,
-				subGroupIndexLabel,
-				subGroupCount,
-			)
+			podSets[psIndex].TopologyRequest = jobframework.NewPodSetTopologyRequest(
+				&(podSpecTemplates[psIndex].ObjectMeta)).
+				PodIndexLabel(podIndexLabel).SubGroup(subGroupIndexLabel, subGroupCount).Build()
 		}
 	}
 	return podSets, nil

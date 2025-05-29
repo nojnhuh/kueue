@@ -48,19 +48,23 @@ const (
 )
 
 var (
-	integrationsPath                  = field.NewPath("integrations")
-	integrationsFrameworksPath        = integrationsPath.Child("frameworks")
-	integrationsExternalFrameworkPath = integrationsPath.Child("externalFrameworks")
-	podOptionsPath                    = integrationsPath.Child("podOptions")
-	podOptionsNamespaceSelectorPath   = podOptionsPath.Child("namespaceSelector")
-	managedJobsNamespaceSelectorPath  = field.NewPath("managedJobsNamespaceSelector")
-	waitForPodsReadyPath              = field.NewPath("waitForPodsReady")
-	requeuingStrategyPath             = waitForPodsReadyPath.Child("requeuingStrategy")
-	multiKueuePath                    = field.NewPath("multiKueue")
-	fsPreemptionStrategiesPath        = field.NewPath("fairSharing", "preemptionStrategies")
-	internalCertManagementPath        = field.NewPath("internalCertManagement")
-	queueVisibilityPath               = field.NewPath("queueVisibility")
-	resourceTransformationPath        = field.NewPath("resources", "transformations")
+	integrationsPath                     = field.NewPath("integrations")
+	integrationsFrameworksPath           = integrationsPath.Child("frameworks")
+	integrationsExternalFrameworkPath    = integrationsPath.Child("externalFrameworks")
+	podOptionsPath                       = integrationsPath.Child("podOptions")
+	podOptionsNamespaceSelectorPath      = podOptionsPath.Child("namespaceSelector")
+	managedJobsNamespaceSelectorPath     = field.NewPath("managedJobsNamespaceSelector")
+	waitForPodsReadyPath                 = field.NewPath("waitForPodsReady")
+	requeuingStrategyPath                = waitForPodsReadyPath.Child("requeuingStrategy")
+	multiKueuePath                       = field.NewPath("multiKueue")
+	fsPreemptionStrategiesPath           = field.NewPath("fairSharing", "preemptionStrategies")
+	afsResourceWeightsPath               = field.NewPath("admissionFairSharing", "resourceWeights")
+	afsPath                              = field.NewPath("admissionFairSharing")
+	internalCertManagementPath           = field.NewPath("internalCertManagement")
+	queueVisibilityPath                  = field.NewPath("queueVisibility")
+	resourceTransformationPath           = field.NewPath("resources", "transformations")
+	objectRetentionPoliciesPath          = field.NewPath("objectRetentionPolicies")
+	objectRetentionPoliciesWorkloadsPath = objectRetentionPoliciesPath.Child("workloads")
 )
 
 func validate(c *configapi.Configuration, scheme *runtime.Scheme) field.ErrorList {
@@ -70,9 +74,11 @@ func validate(c *configapi.Configuration, scheme *runtime.Scheme) field.ErrorLis
 	allErrs = append(allErrs, validateIntegrations(c, scheme)...)
 	allErrs = append(allErrs, validateMultiKueue(c)...)
 	allErrs = append(allErrs, validateFairSharing(c)...)
+	allErrs = append(allErrs, validateAdmissionFairSharing(c)...)
 	allErrs = append(allErrs, validateInternalCertManagement(c)...)
 	allErrs = append(allErrs, validateResourceTransformations(c)...)
 	allErrs = append(allErrs, validateManagedJobsNamespaceSelector(c)...)
+	allErrs = append(allErrs, validateObjectRetentionPolicies(c)...)
 	return allErrs
 }
 
@@ -299,6 +305,30 @@ func validateFairSharing(c *configapi.Configuration) field.ErrorList {
 	return allErrs
 }
 
+func validateAdmissionFairSharing(c *configapi.Configuration) field.ErrorList {
+	afs := c.AdmissionFairSharing
+	if afs == nil {
+		return nil
+	}
+	var allErrs field.ErrorList
+
+	if afs.UsageHalfLifeTime.Duration < 0 {
+		allErrs = append(allErrs, field.Invalid(afsPath.Child("usageHalfLifeTime"),
+			afs.UsageHalfLifeTime, apimachineryvalidation.IsNegativeErrorMsg))
+	}
+	if afs.UsageSamplingInterval.Duration <= 0 {
+		allErrs = append(allErrs, field.Invalid(afsPath.Child("usageSamplingInterval"),
+			afs.UsageHalfLifeTime, "must be greater than 0"))
+	}
+	for resName, weight := range afs.ResourceWeights {
+		if weight < 0 {
+			allErrs = append(allErrs, field.Invalid(afsResourceWeightsPath.Key(string(resName)),
+				afs.ResourceWeights, apimachineryvalidation.IsNegativeErrorMsg))
+		}
+	}
+	return allErrs
+}
+
 func validateResourceTransformations(c *configapi.Configuration) field.ErrorList {
 	res := c.Resources
 	if res == nil {
@@ -376,4 +406,21 @@ func ValidateFeatureGates(featureGateCLI string, featureGateMap map[string]bool)
 	}
 
 	return nil
+}
+
+func validateObjectRetentionPolicies(c *configapi.Configuration) field.ErrorList {
+	var allErrs field.ErrorList
+	rr := c.ObjectRetentionPolicies
+	if rr == nil || rr.Workloads == nil {
+		return allErrs
+	}
+	if rr.Workloads.AfterFinished != nil && rr.Workloads.AfterFinished.Duration < 0 {
+		allErrs = append(allErrs, field.Invalid(objectRetentionPoliciesWorkloadsPath.Child("afterFinished"),
+			c.ObjectRetentionPolicies.Workloads.AfterFinished, apimachineryvalidation.IsNegativeErrorMsg))
+	}
+	if rr.Workloads.AfterDeactivatedByKueue != nil && rr.Workloads.AfterDeactivatedByKueue.Duration < 0 {
+		allErrs = append(allErrs, field.Invalid(objectRetentionPoliciesWorkloadsPath.Child("afterDeactivatedByKueue"),
+			c.ObjectRetentionPolicies.Workloads.AfterDeactivatedByKueue.Duration.String(), apimachineryvalidation.IsNegativeErrorMsg))
+	}
+	return allErrs
 }

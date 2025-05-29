@@ -57,11 +57,6 @@ const (
 	// annotation is set when starting the Job, and removed on stopping the Job.
 	WorkloadAnnotation = "kueue.x-k8s.io/workload"
 
-	// PodSetLabel is a label set on the Job's PodTemplate to indicate the name
-	// of the PodSet of the admitted Workload corresponding to the PodTemplate.
-	// The label is set when starting the Job, and removed on stopping the Job.
-	PodSetLabel = "kueue.x-k8s.io/podset"
-
 	// TASLabel is a label set on the Job's PodTemplate to indicate that the
 	// PodSet is admitted using TopologyAwareScheduling, and all Pods created
 	// from the Job's PodTemplate also have the label. For the Pod-based
@@ -76,6 +71,10 @@ const (
 	// belonging to a Pod group. It indicates a label name used to retrieve
 	// the Pod's index within the group.
 	PodGroupPodIndexLabelAnnotation = "kueue.x-k8s.io/pod-group-pod-index-label"
+
+	// NodeToReplaceAnnotation is an annotation on a Workload. It holds a
+	// name of a failed node running at least one pod of this workload.
+	NodeToReplaceAnnotation = "alpha.kueue.x-k8s.io/node-to-replace"
 )
 
 // TopologySpec defines the desired state of Topology

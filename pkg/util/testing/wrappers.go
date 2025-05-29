@@ -373,6 +373,14 @@ func (w *WorkloadWrapper) PastAdmittedTime(v int32) *WorkloadWrapper {
 	return w
 }
 
+func (w *WorkloadWrapper) SchedulingStatsEviction(evictionState kueue.WorkloadSchedulingStatsEviction) *WorkloadWrapper {
+	if w.Status.SchedulingStats == nil {
+		w.Status.SchedulingStats = &kueue.SchedulingStats{}
+	}
+	w.Status.SchedulingStats.Evictions = append(w.Status.SchedulingStats.Evictions, evictionState)
+	return w
+}
+
 type PodSetWrapper struct{ kueue.PodSet }
 
 func MakePodSet(name kueue.PodSetReference, count int) *PodSetWrapper {
@@ -409,6 +417,11 @@ func (p *PodSetWrapper) PriorityClass(pc string) *PodSetWrapper {
 
 func (p *PodSetWrapper) RuntimeClass(name string) *PodSetWrapper {
 	p.Template.Spec.RuntimeClassName = &name
+	return p
+}
+
+func (p *PodSetWrapper) RestartPolicy(policy corev1.RestartPolicy) *PodSetWrapper {
+	p.Template.Spec.RestartPolicy = policy
 	return p
 }
 
@@ -609,6 +622,11 @@ func (w *AdmissionWrapper) TopologyAssignment(ts *kueue.TopologyAssignment) *Adm
 	return w
 }
 
+func (w *AdmissionWrapper) DelayedTopologyRequest(state kueue.DelayedTopologyRequestState) *AdmissionWrapper {
+	w.DelayedTopologyRequestWithIndex(0, state)
+	return w
+}
+
 func (w *AdmissionWrapper) AssignmentWithIndex(index int32, r corev1.ResourceName, f kueue.ResourceFlavorReference, value string) *AdmissionWrapper {
 	w.PodSetAssignments[index].Flavors[r] = f
 	w.PodSetAssignments[index].ResourceUsage[r] = resource.MustParse(value)
@@ -622,6 +640,11 @@ func (w *AdmissionWrapper) AssignmentPodCountWithIndex(index, value int32) *Admi
 
 func (w *AdmissionWrapper) TopologyAssignmentWithIndex(index int32, ts *kueue.TopologyAssignment) *AdmissionWrapper {
 	w.PodSetAssignments[index].TopologyAssignment = ts
+	return w
+}
+
+func (w *AdmissionWrapper) DelayedTopologyRequestWithIndex(index int32, state kueue.DelayedTopologyRequestState) *AdmissionWrapper {
+	w.PodSetAssignments[index].DelayedTopologyRequest = ptr.To(state)
 	return w
 }
 
@@ -675,9 +698,21 @@ func (q *LocalQueueWrapper) StopPolicy(p kueue.StopPolicy) *LocalQueueWrapper {
 	return q
 }
 
+// FairSharing sets the fair sharing config.
+func (q *LocalQueueWrapper) FairSharing(fs *kueue.FairSharing) *LocalQueueWrapper {
+	q.Spec.FairSharing = fs
+	return q
+}
+
 // PendingWorkloads updates the pendingWorkloads in status.
 func (q *LocalQueueWrapper) PendingWorkloads(n int32) *LocalQueueWrapper {
 	q.Status.PendingWorkloads = n
+	return q
+}
+
+// ReservingWorkloads updates the reservingWorkloads in status.
+func (q *LocalQueueWrapper) ReservingWorkloads(n int32) *LocalQueueWrapper {
+	q.Status.ReservingWorkloads = n
 	return q
 }
 
@@ -696,6 +731,22 @@ func (q *LocalQueueWrapper) Condition(conditionType string, status metav1.Condit
 		Message:            message,
 		ObservedGeneration: generation,
 	})
+	return q
+}
+
+func (q *LocalQueueWrapper) Active(status metav1.ConditionStatus) *LocalQueueWrapper {
+	apimeta.SetStatusCondition(&q.Status.Conditions, metav1.Condition{
+		Type:    kueue.LocalQueueActive,
+		Status:  status,
+		Reason:  "Ready",
+		Message: "Can submit new workloads to localQueue",
+	})
+	return q
+}
+
+// AdmittedWorkloads updates the admittedWorkloads in status.
+func (q *LocalQueueWrapper) FairSharingStatus(status *kueue.FairSharingStatus) *LocalQueueWrapper {
+	q.Status.FairSharing = status
 	return q
 }
 
@@ -784,6 +835,24 @@ func (c *ClusterQueueWrapper) AdmissionCheckStrategy(acs ...kueue.AdmissionCheck
 		c.Spec.AdmissionChecksStrategy = &kueue.AdmissionChecksStrategy{}
 	}
 	c.Spec.AdmissionChecksStrategy.AdmissionChecks = acs
+	return c
+}
+
+func (c *ClusterQueueWrapper) AdmissionMode(am kueue.AdmissionMode) *ClusterQueueWrapper {
+	if c.Spec.AdmissionScope == nil {
+		c.Spec.AdmissionScope = &kueue.AdmissionScope{}
+	}
+	c.Spec.AdmissionScope.AdmissionMode = am
+	return c
+}
+
+func (c *ClusterQueueWrapper) Active(status metav1.ConditionStatus) *ClusterQueueWrapper {
+	apimeta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
+		Type:    kueue.ClusterQueueActive,
+		Status:  status,
+		Reason:  "By test",
+		Message: "by test",
+	})
 	return c
 }
 
@@ -1463,6 +1532,11 @@ func (prc *ProvisioningRequestConfigWrapper) RetryStrategy(retryStrategy *kueue.
 	return prc
 }
 
+func (prc *ProvisioningRequestConfigWrapper) PodSetUpdate(update kueue.ProvisioningRequestPodSetUpdates) *ProvisioningRequestConfigWrapper {
+	prc.Spec.PodSetUpdates = &update
+	return prc
+}
+
 func (prc *ProvisioningRequestConfigWrapper) BaseBackoff(backoffBaseSeconds int32) *ProvisioningRequestConfigWrapper {
 	if prc.Spec.RetryStrategy == nil {
 		prc.Spec.RetryStrategy = &kueue.ProvisioningRequestRetryStrategy{}
@@ -1487,6 +1561,11 @@ func (prc *ProvisioningRequestConfigWrapper) RetryLimit(backoffLimitCount int32)
 	}
 
 	prc.Spec.RetryStrategy.BackoffLimitCount = &backoffLimitCount
+	return prc
+}
+
+func (prc *ProvisioningRequestConfigWrapper) PodSetMergePolicy(mode kueue.ProvisioningRequestConfigPodSetMergePolicy) *ProvisioningRequestConfigWrapper {
+	prc.Spec.PodSetMergePolicy = &mode
 	return prc
 }
 
@@ -1545,6 +1624,28 @@ func (w *PodTemplateWrapper) NodeSelector(k, v string) *PodTemplateWrapper {
 func (w *PodTemplateWrapper) Toleration(toleration corev1.Toleration) *PodTemplateWrapper {
 	w.Template.Spec.Tolerations = append(w.Template.Spec.Tolerations, toleration)
 	return w
+}
+
+func (p *PodTemplateWrapper) PriorityClass(pc string) *PodTemplateWrapper {
+	p.Template.Spec.PriorityClassName = pc
+	return p
+}
+
+func (p *PodTemplateWrapper) RequiredDuringSchedulingIgnoredDuringExecution(nodeSelectorTerms []corev1.NodeSelectorTerm) *PodTemplateWrapper {
+	if p.Template.Spec.Affinity == nil {
+		p.Template.Spec.Affinity = &corev1.Affinity{}
+	}
+	if p.Template.Spec.Affinity.NodeAffinity == nil {
+		p.Template.Spec.Affinity.NodeAffinity = &corev1.NodeAffinity{}
+	}
+	if p.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		p.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution = &corev1.NodeSelector{}
+	}
+	p.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms = append(
+		p.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms,
+		nodeSelectorTerms...,
+	)
+	return p
 }
 
 func (w *PodTemplateWrapper) ControllerReference(gvk schema.GroupVersionKind, name, uid string) *PodTemplateWrapper {

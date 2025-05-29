@@ -57,7 +57,7 @@ func init() {
 }
 
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;watch;update
-// +kubebuilder:rbac:groups=ray.io,resources=rayclusters,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=ray.io,resources=rayclusters,verbs=get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=ray.io,resources=rayclusters/status,verbs=get;patch;update
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloads,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloads/status,verbs=get;update;patch
@@ -113,10 +113,8 @@ func (j *RayCluster) PodSets() ([]kueue.PodSet, error) {
 	}
 
 	if features.Enabled(features.TopologyAwareScheduling) {
-		podSets[0].TopologyRequest = jobframework.PodSetTopologyRequest(
-			&j.Spec.HeadGroupSpec.Template.ObjectMeta,
-			nil, nil, nil,
-		)
+		podSets[0].TopologyRequest = jobframework.NewPodSetTopologyRequest(
+			&j.Spec.HeadGroupSpec.Template.ObjectMeta).Build()
 	}
 
 	// workers
@@ -135,10 +133,8 @@ func (j *RayCluster) PodSets() ([]kueue.PodSet, error) {
 			Count:    count,
 		}
 		if features.Enabled(features.TopologyAwareScheduling) {
-			podSets[index+1].TopologyRequest = jobframework.PodSetTopologyRequest(
-				&wgs.Template.ObjectMeta,
-				nil, nil, nil,
-			)
+			podSets[index+1].TopologyRequest = jobframework.NewPodSetTopologyRequest(
+				&wgs.Template.ObjectMeta).Build()
 		}
 	}
 	return podSets, nil

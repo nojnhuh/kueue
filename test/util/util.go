@@ -69,6 +69,7 @@ import (
 	podconstants "sigs.k8s.io/kueue/pkg/controller/jobs/pod/constants"
 	"sigs.k8s.io/kueue/pkg/metrics"
 	"sigs.k8s.io/kueue/pkg/scheduler/preemption"
+	utilnode "sigs.k8s.io/kueue/pkg/util/node"
 	utiltas "sigs.k8s.io/kueue/pkg/util/tas"
 	"sigs.k8s.io/kueue/pkg/util/testing"
 	"sigs.k8s.io/kueue/pkg/workload"
@@ -158,6 +159,10 @@ func DeleteNamespace(ctx context.Context, c client.Client, ns *corev1.Namespace)
 	return nil
 }
 
+func DeleteAllCronJobsInNamespace(ctx context.Context, c client.Client, ns *corev1.Namespace) error {
+	return deleteAllObjectsInNamespace(ctx, c, ns, &batchv1.CronJob{})
+}
+
 func DeleteAllJobsInNamespace(ctx context.Context, c client.Client, ns *corev1.Namespace) error {
 	return deleteAllObjectsInNamespace(ctx, c, ns, &batchv1.Job{})
 }
@@ -176,6 +181,10 @@ func DeleteAllMPIJobsInNamespace(ctx context.Context, c client.Client, ns *corev
 
 func DeleteAllPyTorchJobsInNamespace(ctx context.Context, c client.Client, ns *corev1.Namespace) error {
 	return deleteAllObjectsInNamespace(ctx, c, ns, &kftraining.PyTorchJob{})
+}
+
+func DeleteAllJAXJobsInNamespace(ctx context.Context, c client.Client, ns *corev1.Namespace) error {
+	return deleteAllObjectsInNamespace(ctx, c, ns, &kftraining.JAXJob{})
 }
 
 func DeleteAllAppWrappersInNamespace(ctx context.Context, c client.Client, ns *corev1.Namespace) error {
@@ -563,6 +572,11 @@ func ExpectEvictedWorkloadsTotalMetric(cqName, reason string, v int) {
 	expectCounterMetric(metric, v)
 }
 
+func ExpectEvictedWorkloadsOnceTotalMetric(cqName string, reason, underlyingCause string, v int) {
+	metric := metrics.EvictedWorkloadsOnceTotal.WithLabelValues(cqName, reason, underlyingCause)
+	expectCounterMetric(metric, v)
+}
+
 func ExpectPreemptedWorkloadsTotalMetric(preemptorCqName, reason string, v int) {
 	metric := metrics.PreemptedWorkloadsTotal.WithLabelValues(preemptorCqName, reason)
 	expectCounterMetric(metric, v)
@@ -574,7 +588,7 @@ func ExpectQuotaReservedWorkloadsTotalMetric(cq *kueue.ClusterQueue, v int) {
 }
 
 func expectCounterMetric(metric prometheus.Counter, count int) {
-	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
+	gomega.EventuallyWithOffset(2, func(g gomega.Gomega) {
 		v, err := testutil.GetCounterMetricValue(metric)
 		g.Expect(err).ToNot(gomega.HaveOccurred())
 		g.Expect(int(v)).Should(gomega.Equal(count))
@@ -1046,4 +1060,35 @@ func MustHaveOwnerReference(g gomega.Gomega, ownerRefs []metav1.OwnerReference, 
 	hasOwnerRef, err := controllerutil.HasOwnerReference(ownerRefs, obj, scheme)
 	g.Expect(err).ToNot(gomega.HaveOccurred())
 	g.Expect(hasOwnerRef).To(gomega.BeTrue())
+}
+
+func DeactivateWorkload(ctx context.Context, c client.Client, key client.ObjectKey) {
+	ginkgo.GinkgoHelper()
+	wl := &kueue.Workload{}
+	gomega.Eventually(func(g gomega.Gomega) {
+		g.Expect(c.Get(ctx, key, wl)).To(gomega.Succeed())
+		wl.Spec.Active = ptr.To(false)
+		g.Expect(c.Update(ctx, wl)).To(gomega.Succeed())
+	}, Timeout, Interval).Should(gomega.Succeed())
+}
+
+// conditionType corev1.NodeConditionType, conditionStatus corev1.ConditionStatus, time time.Time
+func SetNodeCondition(ctx context.Context, k8sClient client.Client, node *corev1.Node, newCondition *corev1.NodeCondition) {
+	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
+		var updatedNode corev1.Node
+		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), &updatedNode)).To(gomega.Succeed())
+		condition := utilnode.GetNodeCondition(&updatedNode, newCondition.Type)
+		changed := false
+		if condition == nil {
+			updatedNode.Status.Conditions = append(updatedNode.Status.Conditions, *newCondition)
+			changed = true
+		} else if condition.Status != newCondition.Status {
+			condition.Status = newCondition.Status
+			condition.LastTransitionTime = newCondition.LastTransitionTime
+			changed = true
+		}
+		if changed {
+			g.Expect(k8sClient.Status().Update(ctx, &updatedNode)).To(gomega.Succeed())
+		}
+	}, Timeout, Interval).Should(gomega.Succeed(), "Failed to set node condition %s to %s for node %s", newCondition.Type, newCondition.Status, node.Name)
 }

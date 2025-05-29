@@ -59,7 +59,7 @@ func init() {
 }
 
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;watch;update
-// +kubebuilder:rbac:groups=ray.io,resources=rayjobs,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=ray.io,resources=rayjobs,verbs=get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=ray.io,resources=rayjobs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ray.io,resources=rayjobs/finalizers,verbs=get;update
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloads,verbs=get;list;watch;create;update;patch;delete
@@ -121,10 +121,8 @@ func (j *RayJob) PodSets() ([]kueue.PodSet, error) {
 		Count:    1,
 	}
 	if features.Enabled(features.TopologyAwareScheduling) {
-		headPodSet.TopologyRequest = jobframework.PodSetTopologyRequest(
-			&j.Spec.RayClusterSpec.HeadGroupSpec.Template.ObjectMeta,
-			nil, nil, nil,
-		)
+		headPodSet.TopologyRequest = jobframework.NewPodSetTopologyRequest(
+			&j.Spec.RayClusterSpec.HeadGroupSpec.Template.ObjectMeta).Build()
 	}
 	podSets = append(podSets, headPodSet)
 
@@ -144,7 +142,7 @@ func (j *RayJob) PodSets() ([]kueue.PodSet, error) {
 			Count:    count,
 		}
 		if features.Enabled(features.TopologyAwareScheduling) {
-			workerPodSet.TopologyRequest = jobframework.PodSetTopologyRequest(&wgs.Template.ObjectMeta, nil, nil, nil)
+			workerPodSet.TopologyRequest = jobframework.NewPodSetTopologyRequest(&wgs.Template.ObjectMeta).Build()
 		}
 		podSets = append(podSets, workerPodSet)
 	}
@@ -160,7 +158,7 @@ func (j *RayJob) PodSets() ([]kueue.PodSet, error) {
 		// Create the TopologyRequest for the Submitter Job PodSet, based on the annotations
 		// in rayJob.Spec.SubmitterPodTemplate, which can be specified by the user.
 		if features.Enabled(features.TopologyAwareScheduling) {
-			submitterJobPodSet.TopologyRequest = jobframework.PodSetTopologyRequest(&submitterJobPodSet.Template.ObjectMeta, nil, nil, nil)
+			submitterJobPodSet.TopologyRequest = jobframework.NewPodSetTopologyRequest(&submitterJobPodSet.Template.ObjectMeta).Build()
 		}
 		podSets = append(podSets, submitterJobPodSet)
 	}

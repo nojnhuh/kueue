@@ -217,7 +217,29 @@ type PodSetAssignment struct {
 	//
 	// +optional
 	TopologyAssignment *TopologyAssignment `json:"topologyAssignment,omitempty"`
+
+	// delayedTopologyRequest indicates the topology assignment is delayed.
+	// Topology assignment might be delayed in case there is ProvisioningRequest
+	// AdmissionCheck used.
+	// Kueue schedules the second pass of scheduling for each workload with at
+	// least one PodSet which has delayedTopologyRequest=true and without
+	// topologyAssignment.
+	//
+	// +optional
+	DelayedTopologyRequest *DelayedTopologyRequestState `json:"delayedTopologyRequest,omitempty"`
 }
+
+// DelayedTopologyRequestState indicates the state of the delayed TopologyRequest.
+// +enum
+type DelayedTopologyRequestState string
+
+const (
+	// This state indicates the delayed TopologyRequest is waiting for determining.
+	DelayedTopologyRequestStatePending DelayedTopologyRequestState = "Pending"
+
+	// This state indicates the delayed TopologyRequest is was requested and completed.
+	DelayedTopologyRequestStateReady DelayedTopologyRequestState = "Ready"
+)
 
 type TopologyAssignment struct {
 	// levels is an ordered list of keys denoting the levels of the assigned
@@ -365,6 +387,48 @@ type WorkloadStatus struct {
 	//
 	// +optional
 	AccumulatedPastExexcutionTimeSeconds *int32 `json:"accumulatedPastExexcutionTimeSeconds,omitempty"`
+
+	// schedulingStats tracks scheduling statistics
+	//
+	// +optional
+	SchedulingStats *SchedulingStats `json:"schedulingStats,omitempty"`
+}
+
+type SchedulingStats struct {
+	// evictions tracks eviction statistics by reason and underlyingCause.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=reason
+	// +listMapKey=underlyingCause
+	// +patchStrategy=merge
+	// +patchMergeKey=reason
+	// +patchMergeKey=underlyingCause
+	Evictions []WorkloadSchedulingStatsEviction `json:"evictions,omitempty"`
+}
+
+type WorkloadSchedulingStatsEviction struct {
+	// reason specifies the programmatic identifier for the eviction cause.
+	//
+	// +required
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=316
+	Reason string `json:"reason"`
+
+	// underlyingCause specifies a finer-grained explanation that complements the eviction reason.
+	// This may be an empty string.
+	//
+	// +required
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=316
+	UnderlyingCause string `json:"underlyingCause"`
+
+	// count tracks the number of evictions for this reason and detailed reason.
+	//
+	// +required
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=0
+	Count int32 `json:"count"`
 }
 
 type RequeueState struct {
@@ -557,6 +621,10 @@ const (
 	// WorkloadEvictedByLocalQueueStopped indicates that the workload was evicted
 	// because the LocalQueue is Stopped.
 	WorkloadEvictedByLocalQueueStopped = "LocalQueueStopped"
+
+	// WorkloadEvictedDueToNodeFailures indicates that the workload was evicted
+	// due to non-recoverable node failures.
+	WorkloadEvictedDueToNodeFailures = "NodeFailures"
 
 	// WorkloadDeactivated indicates that the workload was evicted
 	// because spec.active is set to false.

@@ -157,8 +157,24 @@ const (
 	//
 	// Enable hierarchical cohorts
 	HierarchicalCohorts featuregate.Feature = "HierarchicalCohorts"
-	// Enable hierarchical cohorts controller
-	HierarchialCohorts featuregate.Feature = "HierarchialCohorts"
+
+	// owner: @pbundyra
+	// kep: https://github.com/kubernetes-sigs/kueue/tree/main/keps/4136-admission-fair-sharing
+	//
+	// Enable admission fair sharing
+	AdmissionFairSharing featuregate.Feature = "AdmissionFairSharing"
+
+	// owner: @mwysokin @mykysha @mbobrovskyi
+	// kep: https://github.com/kubernetes-sigs/kueue/tree/main/keps/1618-optional-gc-of-workloads
+	//
+	// Enable object retentions
+	ObjectRetentionPolicies featuregate.Feature = "ObjectRetentionPolicies"
+
+	// owner: @pajakd
+	// kep: https://github.com/kubernetes-sigs/kueue/tree/main/keps/2724-topology-aware-scheduling
+	//
+	// Enable replacement of failed node in TAS.
+	TASFailedNodeReplacement featuregate.Feature = "TASFailedNodeReplacement"
 
 	// owner: @alaypatel07
 	// kep: https://github.com/kubernetes-sigs/kueue/issues/2941
@@ -236,21 +252,34 @@ var defaultVersionedFeatureGates = map[featuregate.Feature]featuregate.Versioned
 	},
 	LocalQueueDefaulting: {
 		{Version: version.MustParse("0.10"), Default: false, PreRelease: featuregate.Alpha},
+		{Version: version.MustParse("0.12"), Default: true, PreRelease: featuregate.Beta},
 	},
 	TASProfileMostFreeCapacity: {
+		{Version: version.MustParse("0.10"), Default: false, PreRelease: featuregate.Alpha},
 		{Version: version.MustParse("0.11"), Default: false, PreRelease: featuregate.Deprecated},
 	},
 	TASProfileLeastFreeCapacity: {
+		{Version: version.MustParse("0.10"), Default: false, PreRelease: featuregate.Alpha},
 		{Version: version.MustParse("0.11"), Default: false, PreRelease: featuregate.Deprecated},
 	},
 	TASProfileMixed: {
+		{Version: version.MustParse("0.10"), Default: false, PreRelease: featuregate.Alpha},
 		{Version: version.MustParse("0.11"), Default: false, PreRelease: featuregate.Deprecated},
 	},
 	HierarchicalCohorts: {
 		{Version: version.MustParse("0.11"), Default: true, PreRelease: featuregate.Beta},
 	},
-	DynamicResourceStructuredParameters: {
+	AdmissionFairSharing: {
 		{Version: version.MustParse("0.12"), Default: false, PreRelease: featuregate.Alpha},
+	},
+	ObjectRetentionPolicies: {
+		{Version: version.MustParse("0.12"), Default: false, PreRelease: featuregate.Alpha},
+	},
+	TASFailedNodeReplacement: {
+		{Version: version.MustParse("0.12"), Default: false, PreRelease: featuregate.Alpha},
+	},
+	DynamicResourceStructuredParameters: {
+		{Version: version.MustParse("0.13"), Default: false, PreRelease: featuregate.Alpha},
 	},
 }
 

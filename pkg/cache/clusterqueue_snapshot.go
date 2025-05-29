@@ -56,6 +56,8 @@ type ClusterQueueSnapshot struct {
 
 	TASFlavors map[kueue.ResourceFlavorReference]*TASFlavorSnapshot
 	tasOnly    bool
+
+	hasProvRequestAdmissionCheck bool
 }
 
 // RGByResource returns the ResourceGroup which contains capacity
@@ -186,7 +188,7 @@ func (c *ClusterQueueSnapshot) fairWeight() *resource.Quantity {
 	return &c.FairWeight
 }
 
-// The methods below implement hierarchicalResourceNode interface.
+// implement flatResourceNode/hierarchicalResourceNode interfaces
 
 func (c *ClusterQueueSnapshot) getResourceNode() resourceNode {
 	return c.ResourceNode
@@ -205,14 +207,14 @@ type WorkloadTASRequests map[kueue.ResourceFlavorReference]FlavorTASRequests
 
 func (c *ClusterQueueSnapshot) FindTopologyAssignmentsForWorkload(
 	tasRequestsByFlavor WorkloadTASRequests,
-	simulateEmpty bool) TASAssignmentsResult {
+	simulateEmpty bool, wl *kueue.Workload) TASAssignmentsResult {
 	result := make(TASAssignmentsResult)
 	for tasFlavor, flavorTASRequests := range tasRequestsByFlavor {
 		// We assume the `tasFlavor` is already in the snapshot as this was
 		// already checked earlier during flavor assignment, and the set of
 		// flavors is immutable in snapshot.
 		tasFlavorCache := c.TASFlavors[tasFlavor]
-		flvResult := tasFlavorCache.FindTopologyAssignmentsForFlavor(flavorTASRequests, simulateEmpty)
+		flvResult := tasFlavorCache.FindTopologyAssignmentsForFlavor(flavorTASRequests, simulateEmpty, wl)
 		for psName, psAssignment := range flvResult {
 			result[psName] = psAssignment
 		}
@@ -222,6 +224,10 @@ func (c *ClusterQueueSnapshot) FindTopologyAssignmentsForWorkload(
 
 func (c *ClusterQueueSnapshot) IsTASOnly() bool {
 	return c.tasOnly
+}
+
+func (c *ClusterQueueSnapshot) HasProvRequestAdmissionCheck() bool {
+	return c.hasProvRequestAdmissionCheck
 }
 
 // Returns all ancestors starting with parent and ending with root

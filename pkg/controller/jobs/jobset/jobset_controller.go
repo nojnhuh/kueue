@@ -57,7 +57,7 @@ func init() {
 
 // +kubebuilder:rbac:groups=scheduling.k8s.io,resources=priorityclasses,verbs=list;get;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;watch;update;patch
-// +kubebuilder:rbac:groups=jobset.x-k8s.io,resources=jobsets,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=jobset.x-k8s.io,resources=jobsets,verbs=get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=jobset.x-k8s.io,resources=jobsets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=jobset.x-k8s.io,resources=jobsets/finalizers,verbs=get;update
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloads,verbs=get;list;watch;create;update;patch;delete
@@ -120,12 +120,11 @@ func (j *JobSet) PodSets() ([]kueue.PodSet, error) {
 			Count:    podsCount(&replicatedJob),
 		}
 		if features.Enabled(features.TopologyAwareScheduling) {
-			podSets[index].TopologyRequest = jobframework.PodSetTopologyRequest(
-				&replicatedJob.Template.Spec.Template.ObjectMeta,
-				ptr.To(batchv1.JobCompletionIndexAnnotation),
+			podSets[index].TopologyRequest = jobframework.NewPodSetTopologyRequest(
+				&replicatedJob.Template.Spec.Template.ObjectMeta).PodIndexLabel(
+				ptr.To(batchv1.JobCompletionIndexAnnotation)).SubGroup(
 				ptr.To(jobsetapi.JobIndexKey),
-				ptr.To(replicatedJob.Replicas),
-			)
+				ptr.To(replicatedJob.Replicas)).Build()
 		}
 	}
 	return podSets, nil

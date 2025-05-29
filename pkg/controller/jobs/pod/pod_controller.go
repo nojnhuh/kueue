@@ -659,11 +659,9 @@ func constructPodSet(p *corev1.Pod) kueue.PodSet {
 		},
 	}
 	if features.Enabled(features.TopologyAwareScheduling) {
-		podSet.TopologyRequest = jobframework.PodSetTopologyRequest(
-			&p.ObjectMeta,
-			ptr.To(kueuealpha.PodGroupPodIndexLabel),
-			nil, nil,
-		)
+		podSet.TopologyRequest = jobframework.NewPodSetTopologyRequest(
+			&p.ObjectMeta).PodIndexLabel(
+			ptr.To(kueuealpha.PodGroupPodIndexLabel)).Build()
 	}
 	return podSet
 }
@@ -787,7 +785,7 @@ func (p *Pod) notRunnableNorSucceededPods() []corev1.Pod {
 // isPodRunnableOrSucceeded returns whether the Pod can eventually run, is Running or Succeeded.
 // A Pod cannot run if it's gated or has no node assignment while having a deletionTimestamp.
 func isPodRunnableOrSucceeded(p *corev1.Pod) bool {
-	if p.DeletionTimestamp != nil && len(p.Spec.NodeName) == 0 {
+	if !p.DeletionTimestamp.IsZero() && len(p.Spec.NodeName) == 0 {
 		return false
 	}
 	return p.Status.Phase != corev1.PodFailed
