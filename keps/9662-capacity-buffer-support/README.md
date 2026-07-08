@@ -1,4 +1,4 @@
-# KEP-NNNN: Your short, descriptive title
+# KEP-9662: CapacityBuffer Support
 
 <!--
 This is the title of your KEP. Keep it short, simple, and descriptive. A good
