@@ -101,6 +101,12 @@ const (
 	// Enables MultiKueue support.
 	MultiKueue featuregate.Feature = "MultiKueue"
 
+	// owner: @nojnhuh
+	//
+	// Enables centralized Topology Aware Scheduling for MultiKueue, making the
+	// manager authoritative for node-level placement across worker clusters.
+	MultiKueueCentralizedTAS featuregate.Feature = "MultiKueueCentralizedTAS"
+
 	// owner: @kevin85421
 	// issue: https://github.com/kubernetes-sigs/kueue/issues/14779
 	//
@@ -763,6 +769,7 @@ var defaultFeatureGateDependencies = map[featuregate.Feature][]featuregate.Featu
 	SchedulingEquivalenceHashingIgnorePodSetName:    {SchedulingEquivalenceHashing},
 	MultiKueueReuseClientConnectionConfigForWorkers: {MultiKueue},
 	TASTopologySpreading:                            {TopologyAwareScheduling},
+	MultiKueueCentralizedTAS:                        {MultiKueue, TopologyAwareScheduling},
 }
 
 // defaultVersionedFeatureGates consists of all known Kueue-specific feature keys.
@@ -807,6 +814,9 @@ var defaultVersionedFeatureGates = map[featuregate.Feature]featuregate.Versioned
 	MultiKueue: {
 		{Version: version.MustParse("0.6"), Default: false, PreRelease: featuregate.Alpha},
 		{Version: version.MustParse("0.9"), Default: true, PreRelease: featuregate.Beta},
+	},
+	MultiKueueCentralizedTAS: {
+		{Version: version.MustParse("0.21"), Default: false, PreRelease: featuregate.Alpha},
 	},
 	MultiKueueBatchJobClearingTTLSecondsAfterFinishedOnWorkerCluster: {
 		{Version: version.MustParse("0.20"), Default: false, PreRelease: featuregate.Alpha},

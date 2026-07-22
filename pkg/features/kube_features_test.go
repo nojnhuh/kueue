@@ -47,6 +47,16 @@ func TestSetFeatureGatesDuringTest(t *testing.T) {
 				TASFailedNodeReplacement:         true,
 			},
 		},
+		"enable centralized TAS sets MultiKueue and TAS": {
+			input: map[featuregate.Feature]bool{
+				MultiKueueCentralizedTAS: true,
+			},
+			wantState: map[featuregate.Feature]bool{
+				MultiKueueCentralizedTAS: true,
+				MultiKueue:               true,
+				TopologyAwareScheduling:  true,
+			},
+		},
 		"disable parent disables child": {
 			input: map[featuregate.Feature]bool{
 				TopologyAwareScheduling: false,
