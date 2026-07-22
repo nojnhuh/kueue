@@ -26,6 +26,7 @@ import (
 
 	"sigs.k8s.io/kueue/pkg/resources"
 	utilpod "sigs.k8s.io/kueue/pkg/util/pod"
+	utiltas "sigs.k8s.io/kueue/pkg/util/tas"
 )
 
 // nonTasUsageCache caches pod usage, to avoid
@@ -39,6 +40,16 @@ type nonTasUsageCache struct {
 type podUsageValue struct {
 	node  string
 	usage resources.Requests
+}
+
+// BelongsToNonTASCache reports whether a Pod's resource usage must be tracked
+// in the TAS cache as non-TAS (external) usage on its node: it is scheduled,
+// not managed by TAS itself, and not terminated.
+func BelongsToNonTASCache(pod *corev1.Pod) bool {
+	if pod == nil || utiltas.IsTAS(pod) || len(pod.Spec.NodeName) == 0 {
+		return false
+	}
+	return !utilpod.IsTerminated(pod)
 }
 
 // removePodUsage removes a pod entry and its node usage from the cache.

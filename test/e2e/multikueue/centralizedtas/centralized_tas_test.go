@@ -56,6 +56,33 @@ var _ = ginkgo.Describe("Centralized TAS", ginkgo.Label("area:multikueue", "feat
 		expectWorkerPodsHostPinned(fixture.workers[clusterName].client, fixture.managerNs.Name, job.Name, tasNode.Name, 1)
 	})
 
+	ginkgo.It("should route around a worker whose TAS node is occupied by a non-TAS pod", func() {
+		worker1Node := getTASWorkerNode(k8sWorker1Client)
+		hogCPU := cpuRequestToSaturateNode(k8sWorker1Client, worker1Node, resource.MustParse("500m"))
+
+		ginkgo.By("occupying worker1 TAS node with a non-TAS pod", func() {
+			_ = createNonTASPodOnNode(k8sWorker1Client, fixture.worker1Ns.Name, "hog", worker1Node.Name, hogCPU)
+		})
+
+		ginkgo.By("waiting for the manager to ingest remote pod usage", func() {
+			gomega.Eventually(func(g gomega.Gomega) {
+				pods := &corev1.PodList{}
+				g.Expect(k8sWorker1Client.List(ctx, pods, client.InNamespace(fixture.worker1Ns.Name))).To(gomega.Succeed())
+				g.Expect(pods.Items).NotTo(gomega.BeEmpty())
+			}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+		})
+
+		job := createTASJob("avoid-worker1", fixture.managerNs.Name, managerLq.Name, 1, "1")
+		util.MustCreate(ctx, k8sManagerClient, job)
+		waitForJobManagedByMultiKueue(job)
+
+		wlKey := workloadKeyForJob(job)
+		waitForWorkloadAdmittedOnCluster(wlKey, fixture.workerCluster2.Name)
+
+		worker2Node := getTASWorkerNode(k8sWorker2Client)
+		expectWorkerPodsHostPinned(k8sWorker2Client, fixture.managerNs.Name, job.Name, worker2Node.Name, 1)
+	})
+
 	ginkgo.It("should not admit workloads when central quota exceeds physical fleet capacity", func() {
 		ginkgo.By("recreating fixture with inflated manager quota", func() {
 			cleanupCentralizedTASFixture(fixture)

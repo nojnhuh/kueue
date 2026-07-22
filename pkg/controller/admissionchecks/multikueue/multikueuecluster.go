@@ -157,7 +157,7 @@ type remoteClient struct {
 	adapters     map[string]jobframework.MultiKueueAdapter
 
 	// schedulerCache is the manager's scheduler cache. When centralized TAS is
-	// enabled, remote Node inventory is fed into its TAS cache. Nil otherwise.
+	// enabled, remote Node/Pod inventory is fed into its TAS cache. Nil otherwise.
 	schedulerCache    *schdcache.Cache
 	watchEstablishing atomic.Bool
 
@@ -282,10 +282,11 @@ func newClientWithWatch(ctx context.Context, config *clientConfig, options clien
 	}
 
 	if features.Enabled(features.MultiKueueCentralizedTAS) {
-		// Cache remote Nodes so the manager can feed physical worker
+		// Cache remote Nodes and Pods so the manager can feed physical worker
 		// capacity into its scheduler TAS cache.
 		cachedKinds.Insert(
 			corev1.SchemeGroupVersion.WithKind("Node").GroupKind(),
+			corev1.SchemeGroupVersion.WithKind("Pod").GroupKind(),
 		)
 	}
 

@@ -18,7 +18,7 @@ package multikueue
 
 // This file implements centralized TAS for MultiKueue. The manager builds a
 // single, cluster-qualified view of every worker's physical capacity by feeding
-// remote Nodes into the same scheduler TAS cache the single-cluster TAS
+// remote Nodes and Pods into the same scheduler TAS cache the single-cluster TAS
 // controllers use. The feature is controlled by the
 // MultiKueueCentralizedTAS feature gate.
 
@@ -28,20 +28,27 @@ import (
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
 	"sigs.k8s.io/kueue/pkg/constants"
 	utiltas "sigs.k8s.io/kueue/pkg/util/tas"
 	"sigs.k8s.io/kueue/pkg/workload"
 	workloadpatching "sigs.k8s.io/kueue/pkg/workload/patching"
 )
 
-// startTASInventoryWatchers feeds remote worker Nodes into the manager's TAS
-// cache using the same mutators as the single-cluster TAS controllers.
+// startTASInventoryWatchers registers Node and Pod event handlers on the remote
+// worker's cache and feeds them into the manager's scheduler TAS cache. It
+// deliberately reuses the very same cache mutators the single-cluster TAS
+// controllers call (TASCache().SyncNode / DeleteNodeByName for nodes and
+// UpdateNonTASUsage / DeleteNonTASUsageByKey for non-TAS usage) and the shared
+// schdcache.BelongsToNonTASCache predicate, so single- and multi-cluster ingest
+// share one code path rather than duplicating the TAS accounting logic.
 func (rc *remoteClient) startTASInventoryWatchers(ctx context.Context) error {
 	tasCache := rc.schedulerCache.TASCache()
 	log := ctrl.LoggerFrom(ctx).WithValues("clusterName", rc.clusterName)
@@ -73,8 +80,36 @@ func (rc *remoteClient) startTASInventoryWatchers(ctx context.Context) error {
 		return err
 	}
 
-	log.V(2).Info("Started centralized-TAS remote node inventory watchers")
+	syncPod := func(obj any) {
+		pod, ok := obj.(*corev1.Pod)
+		if !ok {
+			return
+		}
+		if schdcache.BelongsToNonTASCache(pod) {
+			tasCache.UpdateNonTASUsage(pod, log)
+		} else {
+			tasCache.DeleteNonTASUsageByKey(podKey(pod), log)
+		}
+	}
+
+	if _, err := rc.client.AddCacheEventHandler(ctx, &corev1.Pod{}, toolscache.ResourceEventHandlerFuncs{
+		AddFunc:    syncPod,
+		UpdateFunc: func(_, newObj any) { syncPod(newObj) },
+		DeleteFunc: func(obj any) {
+			if pod, err := deletedObjectState[*corev1.Pod](obj); err == nil {
+				tasCache.DeleteNonTASUsageByKey(podKey(pod), log)
+			}
+		},
+	}); err != nil {
+		return err
+	}
+
+	log.V(2).Info("Started centralized-TAS remote inventory watchers")
 	return nil
+}
+
+func podKey(pod *corev1.Pod) client.ObjectKey {
+	return types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
 }
 
 // projectAdmissionForWorker translates the manager's node-level admission into

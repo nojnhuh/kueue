@@ -85,7 +85,7 @@ var _ = ginkgo.BeforeSuite(func() {
 
 	ctx = ginkgo.GinkgoT().Context()
 
-	// Recreate SA RBAC so rule updates (e.g. node watch for centralized TAS) apply.
+	// Recreate SA RBAC so rule updates (e.g. node/pod watch for centralized TAS) apply.
 	gomega.Expect(util.CleanKubeconfigForMultiKueueSA(ctx, k8sWorker1Client, kueueNS, "mksa")).To(gomega.Succeed())
 	gomega.Expect(util.CleanKubeconfigForMultiKueueSA(ctx, k8sWorker2Client, kueueNS, "mksa")).To(gomega.Succeed())
 	gomega.Expect(util.CleanMultiKueueSecret(ctx, k8sManagerClient, kueueNS, "multikueue1")).To(gomega.Succeed())
@@ -147,5 +147,6 @@ func centralizedTASManagerRules(ctx context.Context) []rbacv1.PolicyRule {
 	rules := util.MultiKueueRulesForManager(ctx, k8sManagerClient)
 	return append(rules,
 		util.PolicyRule("", "nodes", "get", "list", "watch"),
+		util.PolicyRule("", "pods", "get", "list", "watch"),
 	)
 }

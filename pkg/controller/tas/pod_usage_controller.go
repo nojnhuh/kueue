@@ -158,19 +158,7 @@ func isScheduledAndRunning(pod *corev1.Pod) bool {
 }
 
 func belongsToNonTASCache(pod *corev1.Pod) bool {
-	if pod == nil {
-		return false
-	}
-	if utiltas.IsTAS(pod) {
-		return false
-	}
-	if len(pod.Spec.NodeName) == 0 {
-		return false
-	}
-	if utilpod.IsTerminated(pod) {
-		return false
-	}
-	return true
+	return schdcache.BelongsToNonTASCache(pod)
 }
 
 func (r *PodUsageReconciler) notifyFreedNode(nodeName string) {
