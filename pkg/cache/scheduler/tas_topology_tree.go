@@ -133,6 +133,20 @@ func newTopologyTree(levels []string, nodes []*corev1.Node, generation int64) *t
 	return tree
 }
 
+// leafDomainID returns the cache key for a leaf represented by values.
+// Hostname-level topologies key leaves by hostname even when assignments retain
+// the full topology path.
+func leafDomainID(levels, values []string) utiltas.TopologyDomainID {
+	if len(levels) > 0 && utiltas.IsLowestLevelHostname(levels) && len(values) > 0 {
+		return utiltas.TopologyDomainID(values[len(values)-1])
+	}
+	return utiltas.DomainID(values)
+}
+
+func (t *topologyTree) leafDomainID(values []string) utiltas.TopologyDomainID {
+	return leafDomainID(t.levelKeys, values)
+}
+
 func (t *topologyTree) addNode(node *corev1.Node) utiltas.TopologyDomainID {
 	var levelValues []string
 	var domainID utiltas.TopologyDomainID

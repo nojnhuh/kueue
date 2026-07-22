@@ -39,6 +39,7 @@ import (
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/cache/scheduler/simulator"
+	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/podset"
 	"sigs.k8s.io/kueue/pkg/resources"
@@ -433,7 +434,7 @@ type FlavorTASRequests []TASPodSetRequests
 func (s *TASFlavorSnapshot) Fits(flavorUsage workload.TASFlavorUsage) bool {
 	cachingEnabled := features.Enabled(features.TASCachingRemainingResources)
 	for _, domainUsage := range flavorUsage {
-		domainID := utiltas.DomainID(domainUsage.Values)
+		domainID := s.leafDomainID(domainUsage.Values)
 		leaf, found := s.leaves[domainID]
 		if !found {
 			return false
@@ -800,8 +801,7 @@ func (s *TASFlavorSnapshot) requiredReplacementDomain(tr *TASPodSetRequests, ta 
 	if len(domainValues) == 0 {
 		return ""
 	}
-	// Look up domain using full DomainID path (e.g., "b2,r1,b2-r1")
-	domain, found := s.domainsPerLevel[nodeLevel][utiltas.DomainID(domainValues)]
+	domain, found := s.domainsPerLevel[nodeLevel][s.leafDomainID(domainValues)]
 	if !found {
 		return ""
 	}
@@ -817,8 +817,14 @@ func (s *TASFlavorSnapshot) requiredReplacementDomain(tr *TASPodSetRequests, ta 
 // in Node's NodeReady condition
 func (s *TASFlavorSnapshot) IsTopologyAssignmentStale(ta *utiltas.TopologyAssignment) (bool, string) {
 	for _, domain := range ta.Domains {
-		if _, found := s.leaves[utiltas.DomainID(domain.Values)]; !found {
-			return true, domain.Values[0]
+		if _, found := s.leaves[s.leafDomainID(domain.Values)]; !found {
+			if len(domain.Values) == 0 {
+				return true, ""
+			}
+			if !s.isLowestLevelNode {
+				return true, domain.Values[0]
+			}
+			return true, domain.Values[len(domain.Values)-1]
 		}
 	}
 	return false, ""
@@ -851,7 +857,7 @@ func (s *TASFlavorSnapshot) findIncompleteSliceDomain(tr *TASPodSetRequests, ta 
 	nodeLevel := len(s.levelKeys) - 1
 
 	for _, domainFromAssignment := range ta.Domains {
-		domain, ok := s.domainsPerLevel[nodeLevel][utiltas.DomainID(domainFromAssignment.Values)]
+		domain, ok := s.domainsPerLevel[nodeLevel][s.leafDomainID(domainFromAssignment.Values)]
 		if !ok {
 			continue
 		}
@@ -1702,8 +1708,11 @@ func (s *TASFlavorSnapshot) buildAssignment(domains []*domain) *utiltas.Topology
 	// lex sort domains by their levelValues instead of IDs, as leaves' IDs can only contain the hostname
 	slices.SortFunc(domains, s.compareDomainLevelValues)
 	levelIdx := 0
-	// assign only hostname values if topology defines it
-	if s.isLowestLevelNode {
+	// Centralized TAS needs the top cluster level to select the worker.
+	isCentralizedTASTopology := features.Enabled(features.MultiKueueCentralizedTAS) &&
+		len(s.levelKeys) > 0 &&
+		s.levelKeys[0] == constants.MultiKueueClusterLabel
+	if s.isLowestLevelNode && !isCentralizedTASTopology {
 		levelIdx = len(s.levelKeys) - 1
 	}
 	return s.buildTopologyAssignmentForLevels(domains, levelIdx)
@@ -2075,8 +2084,8 @@ func (s *TASFlavorSnapshot) mergeTopologyAssignments(a, b *utiltas.TopologyAssig
 	sortedDomains = append(sortedDomains, a.Domains...)
 	sortedDomains = append(sortedDomains, b.Domains...)
 	slices.SortFunc(sortedDomains, func(a, b utiltas.TopologyDomainAssignment) int {
-		aDomain := s.domainsPerLevel[nodeLevel][utiltas.DomainID(a.Values)]
-		bDomain := s.domainsPerLevel[nodeLevel][utiltas.DomainID(b.Values)]
+		aDomain := s.domainsPerLevel[nodeLevel][s.leafDomainID(a.Values)]
+		bDomain := s.domainsPerLevel[nodeLevel][s.leafDomainID(b.Values)]
 		return cmp.Compare(utiltas.DomainID(aDomain.levelValues), utiltas.DomainID(bDomain.levelValues))
 	})
 	mergedDomains := make([]utiltas.TopologyDomainAssignment, 0, len(sortedDomains))

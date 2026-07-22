@@ -376,7 +376,9 @@ func (c *clusterQueue) isTASViolated() bool {
 		return false
 	}
 	// Skip TAS cache validation when MultiKueue is enabled; topology runs on worker clusters.
-	if c.hasMultiKueueAdmissionCheck() {
+	// With centralized TAS the manager is authoritative for topology, so it must
+	// require its own TAS cache to be initialized instead of skipping validation.
+	if c.hasMultiKueueAdmissionCheck() && !features.Enabled(features.MultiKueueCentralizedTAS) {
 		return false
 	}
 	if !c.isTASInitialized() {

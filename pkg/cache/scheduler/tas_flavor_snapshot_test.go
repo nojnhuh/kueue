@@ -33,6 +33,7 @@ import (
 	crzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/resources"
 	"sigs.k8s.io/kueue/pkg/util/tas"
@@ -67,6 +68,99 @@ func newFreeCapacityTestSnapshot(capacities map[tas.TopologyDomainID]leafCapacit
 	return &TASFlavorSnapshot{
 		topologyTree:   &topologyTree{leaves: leaves},
 		leafCapacities: leafCapacities,
+	}
+}
+
+func TestBuildAssignmentLevels(t *testing.T) {
+	cases := map[string]struct {
+		enabled    bool
+		levels     []string
+		wantLevels []string
+		wantValues [][]string
+	}{
+		"hostname-only assignment by default": {
+			levels:     []string{constants.MultiKueueClusterLabel, corev1.LabelHostname},
+			wantLevels: []string{corev1.LabelHostname},
+			wantValues: [][]string{{"node-a"}, {"node-b"}},
+		},
+		"full assignment for centralized TAS": {
+			enabled:    true,
+			levels:     []string{constants.MultiKueueClusterLabel, corev1.LabelHostname},
+			wantLevels: []string{constants.MultiKueueClusterLabel, corev1.LabelHostname},
+			wantValues: [][]string{{"worker1", "node-a"}, {"worker2", "node-b"}},
+		},
+		"hostname-only assignment for other topologies": {
+			enabled:    true,
+			levels:     []string{"cloud.provider.com/zone", corev1.LabelHostname},
+			wantLevels: []string{corev1.LabelHostname},
+			wantValues: [][]string{{"node-a"}, {"node-b"}},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			features.SetFeatureGateDuringTest(t, features.MultiKueueCentralizedTAS, tc.enabled)
+
+			snapshot := &TASFlavorSnapshot{
+				topologyTree: &topologyTree{
+					levelKeys:         tc.levels,
+					isLowestLevelNode: true,
+				},
+			}
+			domains := addDomainsWithState(snapshot, []testDomainSpec{
+				{
+					domain: domain{levelValues: []string{"worker2", "node-b"}},
+					state:  domainState{podCount: 1},
+				},
+				{
+					domain: domain{levelValues: []string{"worker1", "node-a"}},
+					state:  domainState{podCount: 1},
+				},
+			})
+
+			got := snapshot.buildAssignment(domains)
+			if diff := cmp.Diff(tc.wantLevels, got.Levels); diff != "" {
+				t.Errorf("unexpected levels (-want/+got):\n%s", diff)
+			}
+			gotValues := make([][]string, len(got.Domains))
+			for i := range got.Domains {
+				gotValues[i] = got.Domains[i].Values
+			}
+			if diff := cmp.Diff(tc.wantValues, gotValues); diff != "" {
+				t.Errorf("unexpected domain values (-want/+got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestFullHostnamePathFits(t *testing.T) {
+	_, log := utiltesting.ContextWithLog(t)
+	nodeObj := node.MakeNode("node-a").
+		Label(constants.MultiKueueClusterLabel, "worker1").
+		Label(corev1.LabelHostname, "node-a").
+		StatusAllocatable(corev1.ResourceList{
+			corev1.ResourceCPU:  resource.MustParse("2"),
+			corev1.ResourcePods: resource.MustParse("10"),
+		}).
+		Ready().
+		Obj()
+	snapshot := newTASFlavorSnapshot(
+		log,
+		"tas-topology",
+		newTopologyTree([]string{constants.MultiKueueClusterLabel, corev1.LabelHostname}, []*corev1.Node{nodeObj}, 0),
+		nil,
+		newDefaultSimulatorSnapshot(),
+	)
+
+	usage := workload.TASFlavorUsage{{
+		Values: []string{"worker1", "node-a"},
+		SinglePodRequests: resources.NewRequestsFromMap(map[corev1.ResourceName]int64{
+			corev1.ResourceCPU: 1000,
+		}),
+		Count: 1,
+	}}
+	if !snapshot.Fits(usage) {
+		t.Error("Fits() rejected a full-path assignment for an existing hostname leaf")
 	}
 }
 
@@ -195,6 +289,20 @@ func TestIsTopologyAssignmentStale(t *testing.T) {
 			tree: hostnameLowest,
 			assignment: &tas.TopologyAssignment{
 				Domains: []tas.TopologyDomainAssignment{{Values: []string{"n2"}}},
+			},
+			wantStale:       true,
+			wantStaleDomain: "n2",
+		},
+		"existing full-path hostname leaf is not stale": {
+			tree: hostnameLowest,
+			assignment: &tas.TopologyAssignment{
+				Domains: []tas.TopologyDomainAssignment{{Values: []string{"b1", "n1"}}},
+			},
+		},
+		"missing full-path hostname leaf reports hostname": {
+			tree: hostnameLowest,
+			assignment: &tas.TopologyAssignment{
+				Domains: []tas.TopologyDomainAssignment{{Values: []string{"b1", "n2"}}},
 			},
 			wantStale:       true,
 			wantStaleDomain: "n2",

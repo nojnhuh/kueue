@@ -123,7 +123,7 @@ func (c *ClusterQueueSnapshot) updateTASUsage(usage workload.TASUsage, op usageO
 		for tasFlavor, tasUsage := range usage {
 			if tasFlvCache := c.TASFlavors[tasFlavor]; tasFlvCache != nil {
 				for _, tr := range tasUsage {
-					domainID := utiltas.DomainID(tr.Values)
+					domainID := tasFlvCache.leafDomainID(tr.Values)
 					tasFlvCache.updateTASUsage(domainID, tr.TotalRequests(), op, tr.Count)
 				}
 			}

@@ -284,7 +284,7 @@ func (c *TASFlavorCache) updateUsage(topologyRequests []workload.TopologyDomainR
 	c.Lock()
 	defer c.Unlock()
 	for _, tr := range topologyRequests {
-		domainID := utiltas.DomainID(tr.Values)
+		domainID := leafDomainID(c.topology.Levels, tr.Values)
 		_, found := c.usage[domainID]
 		if !found {
 			c.usage[domainID] = resources.NewRequests()

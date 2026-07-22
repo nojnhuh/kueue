@@ -16,19 +16,28 @@ limitations under the License.
 
 package multikueue
 
-// This file implements centralized TAS inventory for MultiKueue. The manager
-// feeds remote Nodes into the same scheduler TAS cache the single-cluster TAS
+// This file implements centralized TAS for MultiKueue. The manager builds a
+// single, cluster-qualified view of every worker's physical capacity by feeding
+// remote Nodes into the same scheduler TAS cache the single-cluster TAS
 // controllers use. The feature is controlled by the
 // MultiKueueCentralizedTAS feature gate.
 
 import (
 	"context"
+	"fmt"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/constants"
+	utiltas "sigs.k8s.io/kueue/pkg/util/tas"
+	"sigs.k8s.io/kueue/pkg/workload"
+	workloadpatching "sigs.k8s.io/kueue/pkg/workload/patching"
 )
 
 // startTASInventoryWatchers feeds remote worker Nodes into the manager's TAS
@@ -66,4 +75,124 @@ func (rc *remoteClient) startTASInventoryWatchers(ctx context.Context) error {
 
 	log.V(2).Info("Started centralized-TAS remote node inventory watchers")
 	return nil
+}
+
+// projectAdmissionForWorker translates the manager's node-level admission into
+// the admission the worker must execute verbatim. The manager assignment uses
+// the worker cluster as its top (literal) topology level and the node hostname
+// as its lowest level; the projection strips the cluster level and collapses
+// the assignment to a host-exact placement (Levels=[hostname]) that the worker
+// ungater applies as plain node selectors on real worker nodes.
+//
+// It returns the chosen worker cluster (the shared top-level value), the
+// projected Admission, and ok=false when the manager has not yet computed a
+// node-level assignment (so the caller falls back to normal MultiKueue).
+func projectAdmissionForWorker(local *kueue.Workload) (string, *kueue.Admission, bool) {
+	if local.Status.Admission == nil {
+		return "", nil, false
+	}
+	out := local.Status.Admission.DeepCopy()
+	clusterName := ""
+	sawTopology := false
+	for i := range out.PodSetAssignments {
+		psa := &out.PodSetAssignments[i]
+		if psa.TopologyAssignment == nil {
+			continue
+		}
+		internal := utiltas.InternalFrom(psa.TopologyAssignment)
+		if len(internal.Levels) < 2 {
+			// Expect at least [cluster-label, ..., hostname]; without a cluster
+			// level we cannot pick a worker, so treat as not-yet-ready.
+			return "", nil, false
+		}
+		sawTopology = true
+
+		countByHost := make(map[string]int32)
+		var hostOrder []string
+		for _, d := range internal.Domains {
+			cluster := d.Values[0]
+			if clusterName == "" {
+				clusterName = cluster
+			} else if clusterName != cluster {
+				// A workload must be pinned to a single worker cluster.
+				return "", nil, false
+			}
+			host := d.Values[len(d.Values)-1]
+			if _, seen := countByHost[host]; !seen {
+				hostOrder = append(hostOrder, host)
+			}
+			countByHost[host] += d.Count
+		}
+
+		worker := &utiltas.TopologyAssignment{Levels: []string{corev1.LabelHostname}}
+		for _, host := range hostOrder {
+			worker.Domains = append(worker.Domains, utiltas.TopologyDomainAssignment{
+				Values: []string{host},
+				Count:  countByHost[host],
+			})
+		}
+		psa.TopologyAssignment = utiltas.V1Beta2From(worker)
+		psa.DelayedTopologyRequest = nil
+	}
+	if !sawTopology || clusterName == "" {
+		return "", nil, false
+	}
+	return clusterName, out, true
+}
+
+// centralizedTASNominate implements manager-authoritative dispatch:
+// the manager has already computed a full node-level assignment, so instead of
+// letting the worker schedule, it pins the workload to the cluster chosen by the
+// assignment and stamps the projected admission onto the remote workload. The
+// worker then skips scheduling (already admitted) and its ungater executes the
+// manager's host-exact placement. It returns handled=false when the manager has
+// not yet produced a node-level assignment, so the caller runs normal dispatch.
+func (w *wlReconciler) centralizedTASNominate(ctx context.Context, group *wlGroup) (reconcile.Result, bool, error) {
+	log := ctrl.LoggerFrom(ctx).WithValues("op", "centralizedTASNominate")
+
+	clusterName, admission, ok := projectAdmissionForWorker(group.local)
+	if !ok {
+		return reconcile.Result{}, false, nil
+	}
+	log = log.WithValues("chosenCluster", clusterName)
+
+	rc, found := group.remoteClients[clusterName]
+	if !found {
+		return reconcile.Result{}, true, fmt.Errorf("centralized-TAS: chosen cluster %q is not an available worker", clusterName)
+	}
+
+	if !slices.Equal(group.local.Status.NominatedClusterNames, []string{clusterName}) {
+		if err := workloadpatching.PatchAdmissionStatus(ctx, w.client, group.local, w.clock, func(wl *kueue.Workload) (bool, error) {
+			wl.Status.NominatedClusterNames = []string{clusterName}
+			return true, nil
+		}); err != nil {
+			return reconcile.Result{}, true, err
+		}
+	}
+
+	// Ensure only the chosen cluster holds a remote workload (create it if needed).
+	if _, err := w.syncToSingleCluster(ctx, log, group, clusterName); err != nil {
+		return reconcile.Result{}, true, err
+	}
+
+	remoteCl := rc.getClient()
+	remoteWl := &kueue.Workload{}
+	if err := remoteCl.Get(ctx, client.ObjectKeyFromObject(group.local), remoteWl); err != nil {
+		// The remote workload was just created and may not be visible yet; retry.
+		return reconcile.Result{}, true, client.IgnoreNotFound(err)
+	}
+
+	if workload.IsAdmitted(remoteWl) {
+		// Already stamped; the normal reserving-remote path takes over.
+		return reconcile.Result{RequeueAfter: w.workerLostTimeout}, true, nil
+	}
+
+	// Stamp the manager's admission so the worker executes it without scheduling.
+	workload.SetQuotaReservation(remoteWl, admission, w.clock)
+	workload.SetAdmittedCondition(remoteWl, w.clock.Now(), "CentralizedTAS", "Admitted by centralized-TAS manager")
+	if err := remoteCl.Status().Update(ctx, remoteWl); err != nil {
+		return reconcile.Result{}, true, fmt.Errorf("centralized-TAS: stamping remote admission: %w", err)
+	}
+	log.V(2).Info("Stamped manager admission onto remote workload", "podSets", len(admission.PodSetAssignments))
+	return reconcile.Result{RequeueAfter: w.workerLostTimeout}, true, nil
 }
