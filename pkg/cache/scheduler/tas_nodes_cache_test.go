@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/util/testingjobs/node"
 )
@@ -75,6 +76,21 @@ func TestNodesCache(t *testing.T) {
 			nodes: []corev1.Node{*nodeWrapper.Clone().Ready().Obj()},
 			op: func(nc *nodesCache) {
 				nc.delete(nodeWrapper.Node.Name)
+			},
+		},
+		"delete cluster": {
+			nodes: []corev1.Node{
+				*nodeWrapper.Clone().Name("cluster-node-1").Ready().Label(constants.MultiKueueClusterLabel, "test-cluster").Obj(),
+				*nodeWrapper.Clone().Name("cluster-node-2").Ready().Label(constants.MultiKueueClusterLabel, "test-cluster").Obj(),
+				*nodeWrapper.Clone().Name("other-cluster-node").Ready().Label(constants.MultiKueueClusterLabel, "other-cluster").Obj(),
+				*nodeWrapper.Clone().Name("local-node").Ready().Obj(),
+			},
+			op: func(nc *nodesCache) {
+				nc.deleteCluster("test-cluster")
+			},
+			wantNodes: []corev1.Node{
+				*nodeWrapper.Clone().Name("other-cluster-node").Ready().Label(constants.MultiKueueClusterLabel, "other-cluster").Obj(),
+				*nodeWrapper.Clone().Name("local-node").Ready().Obj(),
 			},
 		},
 	}
@@ -255,6 +271,25 @@ func TestNodesCacheGeneration(t *testing.T) {
 		"delete of an absent node does not bump": {
 			op: func(nc *nodesCache) {
 				nc.delete("other")
+			},
+			wantDelta: 0,
+		},
+		"delete cluster bumps once": {
+			prime: []*corev1.Node{
+				baseNode().Clone().Name("cluster-node-1").Label(constants.MultiKueueClusterLabel, "test-cluster").Obj(),
+				baseNode().Clone().Name("cluster-node-2").Label(constants.MultiKueueClusterLabel, "test-cluster").Obj(),
+			},
+			op: func(nc *nodesCache) {
+				nc.deleteCluster("test-cluster")
+			},
+			wantDelta: 1,
+		},
+		"delete absent cluster does not bump": {
+			prime: []*corev1.Node{
+				baseNode().Clone().Label(constants.MultiKueueClusterLabel, "test-cluster").Obj(),
+			},
+			op: func(nc *nodesCache) {
+				nc.deleteCluster("other-cluster")
 			},
 			wantDelta: 0,
 		},

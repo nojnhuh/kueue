@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/features"
 	utiltas "sigs.k8s.io/kueue/pkg/util/tas"
 )
@@ -91,6 +92,23 @@ func (t *nodesCache) delete(nodeName string) {
 	t.lock.Lock()
 	defer t.lock.Unlock()
 	t.deleteWithoutLock(nodeName)
+}
+
+func (t *nodesCache) deleteCluster(clusterName string) {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
+	deleted := false
+	for _, node := range t.nodes {
+		if nodeCluster, ok := node.Labels[constants.MultiKueueClusterLabel]; ok && nodeCluster == clusterName {
+			delete(t.nodes, node.Name)
+			t.schedulableAndReadyNodes.Delete(node.Name)
+			deleted = true
+		}
+	}
+	if deleted {
+		t.generation++
+	}
 }
 
 func (t *nodesCache) deleteWithoutLock(nodeName string) {

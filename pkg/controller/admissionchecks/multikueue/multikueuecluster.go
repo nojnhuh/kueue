@@ -266,23 +266,32 @@ func newClientWithWatch(ctx context.Context, config *clientConfig, options clien
 		return nil, err
 	}
 
-	if !features.Enabled(features.MultiKueueManagerQuotaAutomation) {
-		return NewNeverCachingClient(directClient), nil
-	}
+	cachedKinds := sets.New[schema.GroupKind]()
+	var indexOpts []CacheIndexOption
 
-	cachedKinds := sets.New(
-		kueue.SchemeGroupVersion.WithKind("ClusterQueue").GroupKind(),
-		kueue.SchemeGroupVersion.WithKind("LocalQueue").GroupKind(),
-	)
-
-	indexOpts := []CacheIndexOption{
-		{
+	if features.Enabled(features.MultiKueueManagerQuotaAutomation) {
+		cachedKinds.Insert(
+			kueue.SchemeGroupVersion.WithKind("ClusterQueue").GroupKind(),
+			kueue.SchemeGroupVersion.WithKind("LocalQueue").GroupKind(),
+		)
+		indexOpts = append(indexOpts, CacheIndexOption{
 			Object:       &kueue.LocalQueue{},
 			Field:        indexer.QueueClusterQueueKey,
 			ExtractValue: indexer.IndexQueueClusterQueue,
-		},
+		})
 	}
 
+	if features.Enabled(features.MultiKueueCentralizedTAS) {
+		// Cache remote Nodes so the manager can feed physical worker
+		// capacity into its scheduler TAS cache.
+		cachedKinds.Insert(
+			corev1.SchemeGroupVersion.WithKind("Node").GroupKind(),
+		)
+	}
+
+	if cachedKinds.Len() == 0 && len(indexOpts) == 0 {
+		return NewNeverCachingClient(directClient), nil
+	}
 	return NewSelectivelyCachingClient(ctx, restConfig, directClient, options.Scheme, cachedKinds, indexOpts)
 }
 
@@ -398,6 +407,14 @@ func (rc *remoteClient) updateConfigAndRefreshWatchers(watchCtx context.Context,
 	}
 	if features.Enabled(features.MultiKueueManagerQuotaAutomation) {
 		if err := rc.startQueueWatchers(watchCtx); err != nil {
+			return rc.increaseFailedConnAttempt(), err
+		}
+	}
+
+	if features.Enabled(features.MultiKueueCentralizedTAS) && rc.schedulerCache != nil {
+		if err = rc.startTASInventoryWatchers(watchCtx); err != nil {
+			rc.StopWatchers()
+			rc.connState.markDisconnected(rc.clock.Now())
 			return rc.increaseFailedConnAttempt(), err
 		}
 	}
@@ -671,7 +688,9 @@ func (rc *remoteClient) runWatcher(fn func()) {
 	rc.watchers.Go(fn)
 }
 
-// StopWatchers cancels the watch context and blocks until every watcher goroutine returned.
+// StopWatchers cancels the watch context, blocks until every watcher goroutine
+// returned, and removes remote capacity that must not remain schedulable while
+// the client is stopped.
 func (rc *remoteClient) StopWatchers() {
 	rc.mu.Lock()
 	if rc.watchCancel != nil {
@@ -682,6 +701,10 @@ func (rc *remoteClient) StopWatchers() {
 
 	// Not under rc.mu: watcher goroutines take it themselves via getClient.
 	rc.watchers.Wait()
+
+	if rc.schedulerCache != nil && rc.clusterName != "" {
+		rc.schedulerCache.TASCache().DeleteNodesByCluster(rc.clusterName)
+	}
 }
 
 func (rc *remoteClient) queueWorkloadEvent(ctx context.Context, wlKey types.NamespacedName) {

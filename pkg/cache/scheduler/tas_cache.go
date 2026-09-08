@@ -172,3 +172,7 @@ func (t *tasCache) SyncNode(node *corev1.Node) {
 func (t *tasCache) DeleteNodeByName(nodeName string) {
 	t.nodesCache.delete(nodeName)
 }
+
+func (t *tasCache) DeleteNodesByCluster(clusterName string) {
+	t.nodesCache.deleteCluster(clusterName)
+}
