@@ -37,22 +37,23 @@ type nodesCache struct {
 	// nodes stores stripped Node views that nodesCache treats as immutable. sync
 	// replaces an entry rather than mutating it. The views share Labels, Taints,
 	// and Allocatable with the input Node, so callers must not mutate those fields
-	// after sync.
-	nodes map[string]*corev1.Node
+	// after sync. First index is cluster name, then node name.
+	nodes map[string]map[string]*corev1.Node
 
 	// generation counts changes to scheduling-relevant node data. It increments
 	// when a node is added or removed, or when its labels, taints, or allocatable
 	// resources change - not on every Node update event.
 	generation int64
 
-	// schedulableAndReadyNodes tracks node names that are both schedulable and ready
-	schedulableAndReadyNodes sets.Set[string]
+	// schedulableAndReadyNodes tracks node names that are both schedulable and
+	// ready per cluster
+	schedulableAndReadyNodes map[string]sets.Set[string]
 }
 
 func newNodesCache() *nodesCache {
 	return &nodesCache{
-		nodes:                    make(map[string]*corev1.Node),
-		schedulableAndReadyNodes: sets.New[string](),
+		nodes:                    make(map[string]map[string]*corev1.Node),
+		schedulableAndReadyNodes: make(map[string]sets.Set[string]),
 	}
 }
 
@@ -63,19 +64,23 @@ func (t *nodesCache) sync(node *corev1.Node) {
 	defer t.lock.Unlock()
 
 	if !features.Enabled(features.SchedulerLibraryIntegration) && !schedulableAndReady {
-		t.deleteWithoutLock(node.Name)
+		t.deleteWithoutLock(clusterForNode(node), node.Name)
 		return
 	}
 
-	availabilityChanged := t.schedulableAndReadyNodes.Has(node.Name) != schedulableAndReady
+	cluster := clusterForNode(node)
+	availabilityChanged := t.schedulableAndReadyNodes[cluster].Has(node.Name) != schedulableAndReady
 	if schedulableAndReady {
-		t.schedulableAndReadyNodes.Insert(node.Name)
+		if t.schedulableAndReadyNodes[cluster] == nil {
+			t.schedulableAndReadyNodes[cluster] = sets.New[string]()
+		}
+		t.schedulableAndReadyNodes[cluster].Insert(node.Name)
 	} else {
-		t.schedulableAndReadyNodes.Delete(node.Name)
+		t.schedulableAndReadyNodes[cluster].Delete(node.Name)
 	}
 
 	stripped := copyAndStripNode(node)
-	existing, found := t.nodes[node.Name]
+	existing, found := t.nodes[cluster][node.Name]
 	nodeChanged := !found || !strippedNodesEqual(existing, stripped)
 
 	if !nodeChanged && !availabilityChanged {
@@ -83,38 +88,42 @@ func (t *nodesCache) sync(node *corev1.Node) {
 	}
 
 	if nodeChanged {
-		t.nodes[node.Name] = stripped
+		if t.nodes[cluster] == nil {
+			t.nodes[cluster] = make(map[string]*corev1.Node)
+		}
+		t.nodes[cluster][node.Name] = stripped
 	}
 	t.generation++
 }
 
-func (t *nodesCache) delete(nodeName string) {
+func (t *nodesCache) delete(nodeName string) { t.deleteWithCluster("", nodeName) }
+func (t *nodesCache) deleteWithCluster(clusterName, nodeName string) {
 	t.lock.Lock()
 	defer t.lock.Unlock()
-	t.deleteWithoutLock(nodeName)
+	t.deleteWithoutLock(clusterName, nodeName)
 }
 
 func (t *nodesCache) deleteCluster(clusterName string) {
 	t.lock.Lock()
 	defer t.lock.Unlock()
 
-	deleted := false
-	for _, node := range t.nodes {
-		if nodeCluster, ok := node.Labels[constants.MultiKueueClusterLabel]; ok && nodeCluster == clusterName {
-			delete(t.nodes, node.Name)
-			t.schedulableAndReadyNodes.Delete(node.Name)
-			deleted = true
-		}
-	}
-	if deleted {
+	if nodes, exists := t.nodes[clusterName]; exists && len(nodes) > 0 {
 		t.generation++
 	}
+	delete(t.nodes, clusterName)
+	delete(t.schedulableAndReadyNodes, clusterName)
 }
 
-func (t *nodesCache) deleteWithoutLock(nodeName string) {
-	if _, found := t.nodes[nodeName]; found {
-		delete(t.nodes, nodeName)
-		t.schedulableAndReadyNodes.Delete(nodeName)
+func (t *nodesCache) deleteWithoutLock(clusterName, nodeName string) {
+	if _, found := t.nodes[clusterName][nodeName]; found {
+		delete(t.nodes[clusterName], nodeName)
+		if len(t.nodes[clusterName]) == 0 {
+			delete(t.nodes, clusterName)
+		}
+		t.schedulableAndReadyNodes[clusterName].Delete(nodeName)
+		if t.schedulableAndReadyNodes[clusterName].Len() == 0 {
+			delete(t.schedulableAndReadyNodes, clusterName)
+		}
 		t.generation++
 	}
 }
@@ -130,12 +139,14 @@ func (t *nodesCache) find(nodeLabels map[string]string, levels []string) ([]*cor
 		features.Enabled(features.SchedulerLibraryIntegration) &&
 			(len(levels) == 0 || !utiltas.IsLowestLevelHostname(levels))
 
-	for _, node := range t.nodes {
-		if shouldExcludeUnschedulableAndNotReadyNodes && !t.schedulableAndReadyNodes.Has(node.Name) {
-			continue
-		}
-		if utiltas.NodeMatchesFlavor(node.Labels, nodeLabels, levels) {
-			filteredNodes = append(filteredNodes, node)
+	for cluster, nodes := range t.nodes {
+		for _, node := range nodes {
+			if shouldExcludeUnschedulableAndNotReadyNodes && !t.schedulableAndReadyNodes[cluster].Has(node.Name) {
+				continue
+			}
+			if utiltas.NodeMatchesFlavor(node.Labels, nodeLabels, levels) {
+				filteredNodes = append(filteredNodes, node)
+			}
 		}
 	}
 	return filteredNodes, t.generation
@@ -171,7 +182,15 @@ func copyAndStripNode(node *corev1.Node) *corev1.Node {
 func (t *nodesCache) getAllNodes() []*corev1.Node {
 	t.lock.RLock()
 	defer t.lock.RUnlock()
-	return slices.Collect(maps.Values(t.nodes))
+	var count int
+	for _, nodes := range t.nodes {
+		count += len(nodes)
+	}
+	allNodes := make([]*corev1.Node, 0, count)
+	for _, nodes := range t.nodes {
+		allNodes = slices.Collect(maps.Values(nodes))
+	}
+	return allNodes
 }
 
 // strippedNodesEqual reports whether two stripped nodes carry semantically
@@ -183,4 +202,8 @@ func strippedNodesEqual(a, b *corev1.Node) bool {
 		a.Spec.Unschedulable == b.Spec.Unschedulable &&
 		equality.Semantic.DeepEqual(a.Spec.Taints, b.Spec.Taints) &&
 		equality.Semantic.DeepEqual(a.Status.Allocatable, b.Status.Allocatable)
+}
+
+func clusterForNode(node *corev1.Node) string {
+	return node.Labels[constants.MultiKueueClusterLabel]
 }

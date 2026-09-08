@@ -78,6 +78,18 @@ func TestNodesCache(t *testing.T) {
 				nc.delete(nodeWrapper.Node.Name)
 			},
 		},
+		"sync ready with cluster": {
+			op: func(nc *nodesCache) {
+				nc.sync(nodeWrapper.Clone().Ready().Label(constants.MultiKueueClusterLabel, "test-cluster").Obj())
+			},
+			wantNodes: []corev1.Node{*nodeWrapper.Clone().Ready().Label(constants.MultiKueueClusterLabel, "test-cluster").Obj()},
+		},
+		"delete with cluster": {
+			nodes: []corev1.Node{*nodeWrapper.Clone().Ready().Label(constants.MultiKueueClusterLabel, "test-cluster").Obj()},
+			op: func(nc *nodesCache) {
+				nc.deleteWithCluster("test-cluster", nodeWrapper.Node.Name)
+			},
+		},
 		"delete cluster": {
 			nodes: []corev1.Node{
 				*nodeWrapper.Clone().Name("cluster-node-1").Ready().Label(constants.MultiKueueClusterLabel, "test-cluster").Obj(),
@@ -97,19 +109,11 @@ func TestNodesCache(t *testing.T) {
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			nc := newNodesCache()
-
-			for i := range tc.nodes {
-				nc.nodes[tc.nodes[i].Name] = copyAndStripNode(&tc.nodes[i])
-			}
+			nc.nodes = nodesToMap(tc.nodes)
 
 			tc.op(nc)
 
-			wantNodesMap := make(map[string]*corev1.Node, len(tc.wantNodes))
-			for i := range tc.wantNodes {
-				wantNodesMap[tc.wantNodes[i].Name] = copyAndStripNode(&tc.wantNodes[i])
-			}
-
-			if diff := cmp.Diff(wantNodesMap, nc.nodes); diff != "" {
+			if diff := cmp.Diff(nodesToMap(tc.wantNodes), nc.nodes); diff != "" {
 				t.Errorf("Unexpected nodes (-want,+got):\n%s", diff)
 			}
 		})
@@ -129,9 +133,7 @@ func TestNodesCacheFind(t *testing.T) {
 
 	nodes := []corev1.Node{*node1, *node2, *node3, *node4}
 
-	for i := range nodes {
-		nc.nodes[nodes[i].Name] = copyAndStripNode(&nodes[i])
-	}
+	nc.nodes = nodesToMap(nodes)
 
 	testCases := map[string]struct {
 		nodeLabels map[string]string
@@ -317,7 +319,7 @@ func TestNodesCacheSync(t *testing.T) {
 		prime                             []corev1.Node
 		node                              *corev1.Node
 		wantNodes                         []corev1.Node
-		wantSchedulableAndReady           []string
+		wantSchedulableAndReady           map[string]sets.Set[string]
 	}{
 		"FG disabled: sync not ready removes node": {
 			node: nodeWrapper.DeepCopy(),
@@ -325,7 +327,7 @@ func TestNodesCacheSync(t *testing.T) {
 		"FG disabled: sync ready adds node": {
 			node:                    nodeWrapper.Clone().Ready().Obj(),
 			wantNodes:               []corev1.Node{*nodeWrapper.Clone().Ready().Obj()},
-			wantSchedulableAndReady: []string{"test"},
+			wantSchedulableAndReady: map[string]sets.Set[string]{"": sets.New("test")},
 		},
 		"FG enabled: sync not ready keeps node in cache but not in schedulableAndReady": {
 			enableSchedulerLibraryIntegration: true,
@@ -341,7 +343,12 @@ func TestNodesCacheSync(t *testing.T) {
 			enableSchedulerLibraryIntegration: true,
 			node:                              nodeWrapper.Clone().Ready().Obj(),
 			wantNodes:                         []corev1.Node{*nodeWrapper.Clone().Ready().Obj()},
-			wantSchedulableAndReady:           []string{"test"},
+			wantSchedulableAndReady:           map[string]sets.Set[string]{"": sets.New("test")},
+		},
+		"FG disabled: sync ready adds node with cluster": {
+			node:                    nodeWrapper.Clone().Ready().Label(constants.MultiKueueClusterLabel, "test-cluster").Obj(),
+			wantNodes:               []corev1.Node{*nodeWrapper.Clone().Ready().Label(constants.MultiKueueClusterLabel, "test-cluster").Obj()},
+			wantSchedulableAndReady: map[string]sets.Set[string]{"test-cluster": sets.New("test")},
 		},
 	}
 	for name, tc := range testCases {
@@ -353,18 +360,30 @@ func TestNodesCacheSync(t *testing.T) {
 			}
 			nc.sync(tc.node)
 
-			wantNodeNameNodes := make(map[string]*corev1.Node, len(tc.wantNodes))
-			for i := range tc.wantNodes {
-				wantNodeNameNodes[tc.wantNodes[i].Name] = copyAndStripNode(&tc.wantNodes[i])
-			}
-			if diff := cmp.Diff(wantNodeNameNodes, nc.nodes, cmpopts.SortMaps(func(a, b string) bool {
+			if diff := cmp.Diff(nodesToMap(tc.wantNodes), nc.nodes, cmpopts.SortMaps(func(a, b string) bool {
 				return a < b
 			})); diff != "" {
 				t.Errorf("Unexpected nodes (-want,+got):\n%s", diff)
 			}
-			if diff := cmp.Diff(sets.New(tc.wantSchedulableAndReady...), nc.schedulableAndReadyNodes); diff != "" {
+			// Ignore nil/empty differences
+			if tc.wantSchedulableAndReady == nil {
+				tc.wantSchedulableAndReady = make(map[string]sets.Set[string])
+			}
+			if diff := cmp.Diff(tc.wantSchedulableAndReady, nc.schedulableAndReadyNodes); diff != "" {
 				t.Errorf("Unexpected schedulableAndReadyNodes (-want,+got):\n%s", diff)
 			}
 		})
 	}
+}
+
+func nodesToMap(nodes []corev1.Node) map[string]map[string]*corev1.Node {
+	m := make(map[string]map[string]*corev1.Node)
+	for _, node := range nodes {
+		cluster := clusterForNode(&node)
+		if m[cluster] == nil {
+			m[cluster] = make(map[string]*corev1.Node)
+		}
+		m[cluster][node.Name] = copyAndStripNode(&node)
+	}
+	return m
 }

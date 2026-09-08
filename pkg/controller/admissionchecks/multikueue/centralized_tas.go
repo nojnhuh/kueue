@@ -57,7 +57,7 @@ func (rc *remoteClient) startTASInventoryWatchers(ctx context.Context) error {
 		UpdateFunc: func(_, newObj any) { syncNode(newObj) },
 		DeleteFunc: func(obj any) {
 			if node, err := deletedObjectState[*corev1.Node](obj); err == nil {
-				tasCache.DeleteNodeByName(node.Name)
+				tasCache.DeleteNodeByNameWithCluster(rc.clusterName, node.Name)
 			}
 		},
 	}); err != nil {
