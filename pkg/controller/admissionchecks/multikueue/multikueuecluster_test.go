@@ -886,7 +886,7 @@ func TestReconnectBackoff(t *testing.T) {
 				return inner(builderCtx, cfg, opts)
 			}
 
-			rc := newRemoteClient(c, reconciler.wlUpdateCh, reconciler.watchEndedCh, reconciler.cqUpdateCh, defaultOrigin, "worker1", adapters)
+			rc := newRemoteClient(c, reconciler.wlUpdateCh, reconciler.watchEndedCh, reconciler.cqUpdateCh, defaultOrigin, "worker1", adapters, nil)
 			rc.clock = fc
 			rc.builderOverride = reconciler.builderOverride
 			reconciler.remoteClients["worker1"] = rc
@@ -1019,7 +1019,7 @@ func TestActiveConditionSurfacesBackoff(t *testing.T) {
 	cRec := newClustersReconciler(managerClient, TestNamespace, withAdapters(adapters), withEventRecorder(recorder))
 
 	nextRetry := time.Now().Truncate(time.Second).Add(20 * time.Second)
-	rc := newRemoteClient(managerClient, nil, nil, nil, defaultOrigin, "", adapters)
+	rc := newRemoteClient(managerClient, nil, nil, nil, defaultOrigin, "", adapters, nil)
 	rc.failedConnAttempts = 3
 	rc.retryConnNextAttempt = metav1.NewTime(nextRetry)
 	cRec.remoteClients["worker1"] = rc
@@ -1163,7 +1163,7 @@ func TestRemoteClientGC(t *testing.T) {
 			worker1Client := NewNeverCachingClient(worker1Builder.Build())
 
 			adapters, _ := jobs.NewIntegrationManager().GetMultiKueueAdapters(sets.New("batch/job"))
-			w1remoteClient := newRemoteClient(managerClient, nil, nil, nil, defaultOrigin, "", adapters)
+			w1remoteClient := newRemoteClient(managerClient, nil, nil, nil, defaultOrigin, "", adapters, nil)
 			w1remoteClient.client = worker1Client
 			w1remoteClient.connState.markConnected()
 
