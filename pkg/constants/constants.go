@@ -52,6 +52,10 @@ const (
 	ManagedByKueueLabelKey   = "kueue.x-k8s.io/managed"
 	ManagedByKueueLabelValue = "true"
 
+	// MultiKueueClusterLabel identifies the worker cluster represented by a
+	// Node in the manager's centralized TAS cache.
+	MultiKueueClusterLabel = "kueue.x-k8s.io/multikueue-cluster"
+
 	// PodSetLabel is a label set on the Job's PodTemplate to indicate the name
 	// of the PodSet of the admitted Workload corresponding to the PodTemplate.
 	// The label is set when starting the Job, and removed on stopping the Job.
