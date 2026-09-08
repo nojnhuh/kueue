@@ -18,7 +18,36 @@ package tas
 
 import (
 	corev1 "k8s.io/api/core/v1"
+
+	"sigs.k8s.io/kueue/pkg/constants"
 )
+
+type NodeKey struct {
+	Cluster string
+	Name    string
+}
+
+func NodeKeyFor(node *corev1.Node) NodeKey {
+	return NodeKey{Cluster: node.Labels[constants.MultiKueueClusterLabel], Name: node.Name}
+}
+
+// HostnameDomainID identifies the same capacity across flavors, independent of
+// their rack/zone hierarchy. Empty cluster preserves single-cluster identities.
+func HostnameDomainID(cluster, hostname string) TopologyDomainID {
+	if cluster == "" {
+		return TopologyDomainID(hostname)
+	}
+	return DomainID([]string{cluster, hostname})
+}
+
+// ClusterFromTopology extracts the worker from a complete manager assignment.
+// Local and partial paths do not identify a worker cluster.
+func ClusterFromTopology(levels, values []string) string {
+	if len(levels) > 0 && len(levels) == len(values) && levels[0] == constants.MultiKueueClusterLabel {
+		return values[0]
+	}
+	return ""
+}
 
 // NodeHostname returns the value that identifies the node in a hostname-level
 // topology domain: its kubernetes.io/hostname label, which can differ from the

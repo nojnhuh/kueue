@@ -173,6 +173,10 @@ func (t *tasCache) DeleteNodeByName(nodeName string) {
 	t.nodesCache.delete(nodeName)
 }
 
+func (t *tasCache) DeleteNodeByNameWithCluster(clusterName, nodeName string) {
+	t.nodesCache.deleteWithCluster(clusterName, nodeName)
+}
+
 func (t *tasCache) DeleteNodesByCluster(clusterName string) {
 	t.nodesCache.deleteCluster(clusterName)
 }

@@ -20,6 +20,7 @@ package was
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"maps"
@@ -49,6 +50,7 @@ import (
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/cache/scheduler/simulator"
 	"sigs.k8s.io/kueue/pkg/features"
+	utiltas "sigs.k8s.io/kueue/pkg/util/tas"
 )
 
 type snapshotFactory func(ctx context.Context, pods []*corev1.Pod, nodes []*corev1.Node) (*schedLibSnapshot.ClusterSnapshot, error)
@@ -175,19 +177,103 @@ func NewWASSimulator(ctx context.Context, restConfig *rest.Config) (*wasSimulato
 }
 
 func (s *wasSimulator) Snapshot(ctx context.Context, nodes []*corev1.Node) (simulator.SimulatorSnapshot, error) {
-	allPods, podsByWorkload := s.pods.snapshot()
+	allPods, ownersByWorkload := s.pods.snapshot()
+	nodesByCluster := map[string][]*corev1.Node{"": nil}
+	for _, node := range nodes {
+		cluster := utiltas.NodeKeyFor(node).Cluster
+		nodesByCluster[cluster] = append(nodesByCluster[cluster], node)
+	}
+	if len(nodesByCluster) == 1 {
+		return s.clusterSnapshot(ctx, allPods, ownersByWorkload, nodes)
+	}
+	result := &multiClusterSimulatorSnapshot{clusters: make(map[string]*wasSimulatorSnapshot, len(nodesByCluster))}
+	for _, cluster := range slices.Sorted(maps.Keys(nodesByCluster)) {
+		var pods []*corev1.Pod
+		var owners podsByWorkload
+		if cluster == "" {
+			pods, owners = allPods, ownersByWorkload
+		}
+		snapshot, err := s.clusterSnapshot(ctx, pods, owners, nodesByCluster[cluster])
+		if err != nil {
+			return nil, fmt.Errorf("building simulator snapshot for cluster %q: %w", cluster, err)
+		}
+		result.clusters[cluster] = snapshot
+	}
+	return result, nil
+}
+
+func (s *wasSimulator) clusterSnapshot(ctx context.Context, allPods []*corev1.Pod, owners podsByWorkload, nodes []*corev1.Node) (*wasSimulatorSnapshot, error) {
 	clusterSnap, err := s.newSnapshot(ctx, allPods, nodes)
 	if err != nil {
 		return nil, err
 	}
 	snapshot := &wasSimulatorSnapshot{
 		wasSnapshot:    clusterSnap,
-		podsByWorkload: podsByWorkload,
+		podsByWorkload: owners,
 	}
 	snapshot.emptyCluster.build = func(ctx context.Context) (*schedLibSnapshot.ClusterSnapshot, error) {
-		return s.newSnapshot(ctx, podsNotManagedByKueue(allPods, podsByWorkload), nodes)
+		return s.newSnapshot(ctx, podsNotManagedByKueue(allPods, owners), nodes)
 	}
 	return snapshot, nil
+}
+
+type multiClusterSimulatorSnapshot struct {
+	clusters map[string]*wasSimulatorSnapshot
+}
+
+func (s *multiClusterSimulatorSnapshot) FindFeasibleNodes(
+	ctx context.Context,
+	candidates iter.Seq[simulator.Candidate],
+	requirements *simulator.PodRequirements,
+	stats *simulator.NodeExclusionStats,
+) ([]simulator.MatchedCandidate, error) {
+	byCluster := make(map[string][]simulator.Candidate)
+	for candidate := range candidates {
+		node := candidate.GetNode()
+		if node == nil {
+			return nil, fmt.Errorf("simulator candidate %q has no node", candidate.GetID())
+		}
+		cluster := utiltas.NodeKeyFor(node).Cluster
+		byCluster[cluster] = append(byCluster[cluster], candidate)
+	}
+	var result []simulator.MatchedCandidate
+	for _, cluster := range slices.Sorted(maps.Keys(byCluster)) {
+		snapshot, found := s.clusters[cluster]
+		if !found {
+			return nil, fmt.Errorf("simulator snapshot for cluster %q not found", cluster)
+		}
+		var clusterStats simulator.NodeExclusionStats
+		matches, err := snapshot.FindFeasibleNodes(ctx, slices.Values(byCluster[cluster]), requirements, &clusterStats)
+		if err != nil {
+			return nil, fmt.Errorf("simulating placement in cluster %q: %w", cluster, err)
+		}
+		stats.TotalNodes += clusterStats.TotalNodes
+		stats.SchedulerLibraryNoFit += clusterStats.SchedulerLibraryNoFit
+		result = append(result, matches...)
+	}
+	return result, nil
+}
+
+func (s *multiClusterSimulatorSnapshot) PreemptWorkload(ctx context.Context, key client.ObjectKey) (func() error, error) {
+	// The tracker contains only local Pods; worker Pods are not ingested into WAS.
+	return s.clusters[""].PreemptWorkload(ctx, key)
+}
+
+func (s *multiClusterSimulatorSnapshot) Simulate(ctx context.Context, fn func()) error {
+	clusters := slices.Sorted(maps.Keys(s.clusters))
+	var simulate func(int) error
+	simulate = func(index int) error {
+		if index == len(clusters) {
+			fn()
+			return nil
+		}
+		var innerErr error
+		err := s.clusters[clusters[index]].Simulate(ctx, func() {
+			innerErr = simulate(index + 1)
+		})
+		return errors.Join(err, innerErr)
+	}
+	return simulate(0)
 }
 
 // podsNotManagedByKueue returns the Pods that belong to no Workload. Preemption
