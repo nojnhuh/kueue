@@ -559,6 +559,7 @@ func setupControllers(
 			multikueue.WithClusterProfiles(cfg.MultiKueue.ClusterProfile),
 			multikueue.WithRoleTracker(opts.RoleTracker),
 			multikueue.WithClientConnection(cfg.ClientConnection),
+			multikueue.WithSchedulerCache(cCache),
 		); err != nil {
 			return fmt.Errorf("could not setup MultiKueue controller: %w", err)
 		}

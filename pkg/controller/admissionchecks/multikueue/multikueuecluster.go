@@ -66,6 +66,7 @@ import (
 
 	configapi "sigs.k8s.io/kueue/apis/config/v1beta2"
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
 	"sigs.k8s.io/kueue/pkg/controller/core/indexer"
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
 	"sigs.k8s.io/kueue/pkg/features"
@@ -155,6 +156,9 @@ type remoteClient struct {
 	origin       string
 	adapters     map[string]jobframework.MultiKueueAdapter
 
+	// schedulerCache is the manager's scheduler cache. When centralized TAS is
+	// enabled, remote Node inventory is fed into its TAS cache. Nil otherwise.
+	schedulerCache    *schdcache.Cache
 	watchEstablishing atomic.Bool
 
 	connState connectionState
@@ -229,16 +233,18 @@ func newRemoteClient(
 	cqUpdateCh chan<- event.TypedGenericEvent[kueue.ClusterQueueReference],
 	origin, clusterName string,
 	adapters map[string]jobframework.MultiKueueAdapter,
+	schedulerCache *schdcache.Cache,
 ) *remoteClient {
 	rc := &remoteClient{
-		clusterName:  clusterName,
-		wlUpdateCh:   wlUpdateCh,
-		watchEndedCh: watchEndedCh,
-		cqUpdateCh:   cqUpdateCh,
-		localClient:  localClient,
-		origin:       origin,
-		adapters:     adapters,
-		clock:        clock.RealClock{},
+		clusterName:    clusterName,
+		wlUpdateCh:     wlUpdateCh,
+		watchEndedCh:   watchEndedCh,
+		cqUpdateCh:     cqUpdateCh,
+		localClient:    localClient,
+		origin:         origin,
+		adapters:       adapters,
+		schedulerCache: schedulerCache,
+		clock:          clock.RealClock{},
 	}
 	// Start in the disconnected state, tracking the loss from creation. If the worker is
 	// unreachable when the client is created (e.g. the admitting worker is down right after a
@@ -804,6 +810,10 @@ type clustersReconciler struct {
 	roleTracker *roletracker.RoleTracker
 
 	clientConnection *configapi.ClientConnection
+
+	// schedulerCache is the manager's scheduler cache, threaded to each
+	// remoteClient for centralized TAS. Nil when the feature is off.
+	schedulerCache *schdcache.Cache
 }
 
 type clusterProfileAccessProvider interface {
@@ -859,7 +869,7 @@ func (c *clustersReconciler) findOrCreateRemoteClient(clusterName, origin string
 
 	client, found := c.remoteClients[clusterName]
 	if !found {
-		client = newRemoteClient(c.localClient, c.wlUpdateCh, c.watchEndedCh, c.cqUpdateCh, origin, clusterName, c.adapters)
+		client = newRemoteClient(c.localClient, c.wlUpdateCh, c.watchEndedCh, c.cqUpdateCh, origin, clusterName, c.adapters, c.schedulerCache)
 		if c.builderOverride != nil {
 			client.builderOverride = c.builderOverride
 		}
@@ -1247,6 +1257,7 @@ func newClustersReconciler(
 	roleTracker *roletracker.RoleTracker,
 	recorder events.EventRecorder,
 	clientConnection *configapi.ClientConnection,
+	schedulerCache *schdcache.Cache,
 ) *clustersReconciler {
 	return &clustersReconciler{
 		localClient:                  c,
@@ -1265,6 +1276,7 @@ func newClustersReconciler(
 		logName:                      "multikueue-multikueuecluster-reconciler",
 		roleTracker:                  roleTracker,
 		clientConnection:             clientConnection,
+		schedulerCache:               schedulerCache,
 	}
 }
 
