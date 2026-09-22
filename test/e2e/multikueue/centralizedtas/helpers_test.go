@@ -34,8 +34,11 @@ import (
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/constants"
 	workloadjob "sigs.k8s.io/kueue/pkg/controller/jobs/job"
+	"sigs.k8s.io/kueue/pkg/resources"
+	utilpod "sigs.k8s.io/kueue/pkg/util/pod"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	testingjob "sigs.k8s.io/kueue/pkg/util/testingjobs/job"
+	testingpod "sigs.k8s.io/kueue/pkg/util/testingjobs/pod"
 	"sigs.k8s.io/kueue/test/util"
 )
 
@@ -234,6 +237,43 @@ func getTASWorkerNode(k8sClient client.Client) *corev1.Node {
 	return &nodes.Items[0]
 }
 
+func createNonTASPodOnNode(k8sClient client.Client, ns, name, nodeName, cpu string) *corev1.Pod {
+	ginkgo.GinkgoHelper()
+	pod := testingpod.MakePod(name, ns).
+		Request(corev1.ResourceCPU, cpu).
+		Request(corev1.ResourceMemory, "128Mi").
+		NodeName(nodeName).
+		Image(util.GetAgnHostImage(), util.BehaviorWaitForDeletion).
+		TerminationGracePeriod(0).
+		Obj()
+	util.MustCreate(ctx, k8sClient, pod)
+	gomega.Eventually(func(g gomega.Gomega) {
+		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)).To(gomega.Succeed())
+		g.Expect(pod.Spec.NodeName).To(gomega.Equal(nodeName))
+		g.Expect(pod.Status.Phase).To(gomega.Equal(corev1.PodRunning))
+	}, util.Timeout, util.Interval).Should(gomega.Succeed())
+	return pod
+}
+
+func cpuRequestToSaturateNode(k8sClient client.Client, node *corev1.Node, reserve resource.Quantity) string {
+	ginkgo.GinkgoHelper()
+	alloc := node.Status.Allocatable[corev1.ResourceCPU]
+	pods := &corev1.PodList{}
+	gomega.Expect(k8sClient.List(ctx, pods)).To(gomega.Succeed())
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.Spec.NodeName == node.Name && !utilpod.IsTerminated(pod) {
+			used := resources.NewRequestsFromPodSpec(&pod.Spec).ResourceValue(corev1.ResourceCPU)
+			alloc.Sub(*resource.NewMilliQuantity(used, resource.DecimalSI))
+		}
+	}
+	alloc.Sub(reserve)
+	if alloc.Sign() <= 0 {
+		return "1"
+	}
+	return alloc.String()
+}
+
 func smallestTASNodeCPU(clients ...client.Client) resource.Quantity {
 	ginkgo.GinkgoHelper()
 	var smallest *resource.Quantity
@@ -294,6 +334,20 @@ func waitForManagerCentralizedAdmission(wlKey types.NamespacedName) (clusterName
 		levels = ta.Levels
 	}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
 	return clusterName, levels
+}
+
+func waitForWorkloadAdmittedOnCluster(wlKey types.NamespacedName, expectedCluster string) {
+	ginkgo.GinkgoHelper()
+	waitForManagerCentralizedAdmission(wlKey)
+	gomega.Eventually(func(g gomega.Gomega) {
+		wl := &kueue.Workload{}
+		g.Expect(k8sManagerClient.Get(ctx, wlKey, wl)).To(gomega.Succeed())
+		g.Expect(wl.Status.ClusterName).NotTo(gomega.BeNil())
+		g.Expect(*wl.Status.ClusterName).To(gomega.Equal(expectedCluster))
+		cond := apimeta.FindStatusCondition(wl.Status.Conditions, kueue.WorkloadAdmitted)
+		g.Expect(cond).NotTo(gomega.BeNil())
+		g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionTrue))
+	}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
 }
 
 func expectWorkloadNotAdmitted(wlKey types.NamespacedName) {

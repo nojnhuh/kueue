@@ -118,7 +118,7 @@ func WithClientConnection(c *configapi.ClientConnection) SetupOption {
 }
 
 // WithSchedulerCache provides the manager's scheduler cache so the
-// centralized TAS feature can feed remote worker Node inventory into its
+// centralized TAS feature can feed remote worker Node/Pod inventory into its
 // TAS cache. It is a no-op unless centralized TAS is enabled.
 func WithSchedulerCache(c *schdcache.Cache) SetupOption {
 	return func(o *SetupOptions) {
