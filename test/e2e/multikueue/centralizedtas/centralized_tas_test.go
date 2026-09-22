@@ -21,9 +21,12 @@ import (
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
+	"sigs.k8s.io/kueue/pkg/workload"
 	"sigs.k8s.io/kueue/test/util"
 )
 
@@ -81,6 +84,57 @@ var _ = ginkgo.Describe("Centralized TAS", ginkgo.Label("area:multikueue", "feat
 
 		worker2Node := getTASWorkerNode(k8sWorker2Client)
 		expectWorkerPodsHostPinned(k8sWorker2Client, fixture.managerNs.Name, job.Name, worker2Node.Name, 1)
+	})
+
+	ginkgo.It("should account for identically named external Pods independently on each worker", func() {
+		firstNode := getTASWorkerNode(k8sWorker1Client)
+		secondNode := getTASWorkerNode(k8sWorker2Client)
+		firstHog := createNonTASPodOnNode(k8sWorker1Client, fixture.worker1Ns.Name, "same-hog", firstNode.Name,
+			cpuRequestToSaturateNode(k8sWorker1Client, firstNode, resource.MustParse("500m")))
+		secondHog := createNonTASPodOnNode(k8sWorker2Client, fixture.worker2Ns.Name, "same-hog", secondNode.Name,
+			cpuRequestToSaturateNode(k8sWorker2Client, secondNode, resource.MustParse("500m")))
+
+		expectPendingWithoutReservation := func(name string) {
+			ginkgo.GinkgoHelper()
+			probe := createTASJob(name, fixture.managerNs.Name, managerLq.Name, 1, "1")
+			util.MustCreate(ctx, k8sManagerClient, probe)
+			waitForJobManagedByMultiKueue(probe)
+			key := workloadKeyForJob(probe)
+			gomega.Eventually(func(g gomega.Gomega) {
+				wl := &kueue.Workload{}
+				g.Expect(k8sManagerClient.Get(ctx, key, wl)).To(gomega.Succeed())
+				g.Expect(wl.Status.Conditions).To(utiltesting.HaveConditionStatusFalse(kueue.WorkloadQuotaReserved))
+			}, util.Timeout, util.Interval).Should(gomega.Succeed())
+			gomega.Consistently(func(g gomega.Gomega) {
+				wl := &kueue.Workload{}
+				g.Expect(k8sManagerClient.Get(ctx, key, wl)).To(gomega.Succeed())
+				g.Expect(workload.HasQuotaReservation(wl)).To(gomega.BeFalse())
+			}, util.ShortConsistentDuration, util.ShortInterval).Should(gomega.Succeed())
+			// Probe fresh admissions after releasing capacity; remote-Pod
+			// notifications do not currently requeue inadmissible workloads.
+			util.ExpectObjectToBeDeleted(ctx, k8sManagerClient, probe, true)
+			util.ExpectObjectToBeDeleted(ctx, k8sManagerClient, &kueue.Workload{
+				ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+			}, true)
+		}
+
+		expectPendingWithoutReservation("blocked-before-first-release")
+		util.ExpectObjectToBeDeleted(ctx, k8sWorker1Client, firstHog, true)
+		first := createTASJob("first-isolated", fixture.managerNs.Name, managerLq.Name, 1, "1")
+		util.MustCreate(ctx, k8sManagerClient, first)
+		waitForJobManagedByMultiKueue(first)
+		waitForWorkloadAdmittedOnCluster(workloadKeyForJob(first), fixture.workerCluster1.Name)
+		expectWorkerPodsHostPinned(k8sWorker1Client, fixture.managerNs.Name, first.Name, firstNode.Name, 1)
+
+		_ = createNonTASPodOnNode(k8sWorker1Client, fixture.worker1Ns.Name, "same-hog", firstNode.Name,
+			cpuRequestToSaturateNode(k8sWorker1Client, firstNode, resource.MustParse("500m")))
+		expectPendingWithoutReservation("blocked-before-second-release")
+		util.ExpectObjectToBeDeleted(ctx, k8sWorker2Client, secondHog, true)
+		second := createTASJob("second-isolated", fixture.managerNs.Name, managerLq.Name, 1, "1")
+		util.MustCreate(ctx, k8sManagerClient, second)
+		waitForJobManagedByMultiKueue(second)
+		waitForWorkloadAdmittedOnCluster(workloadKeyForJob(second), fixture.workerCluster2.Name)
+		expectWorkerPodsHostPinned(k8sWorker2Client, fixture.managerNs.Name, second.Name, secondNode.Name, 1)
 	})
 
 	ginkgo.It("should not admit workloads when central quota exceeds physical fleet capacity", func() {
