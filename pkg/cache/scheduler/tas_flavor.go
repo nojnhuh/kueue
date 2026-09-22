@@ -210,8 +210,8 @@ func (c *TASFlavorCache) snapshot(
 		tasDomainUsages = aggregatedDomainUsages
 	}
 	snapshot.addTASUsageForHeldDomains(tasDomainUsages)
-	c.nonTasUsageCache.forEachNodeUsage(func(nodeName string, usage resources.Requests) {
-		if domainID, ok := tree.nodeToDomain[utiltas.NodeKey{Name: nodeName}]; ok {
+	c.nonTasUsageCache.forEachClusterNodeUsage(func(node utiltas.NodeKey, usage resources.Requests) {
+		if domainID, ok := tree.nodeToDomain[node]; ok {
 			snapshot.addNonTASUsage(domainID, usage)
 		}
 	})

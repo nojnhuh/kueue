@@ -26,6 +26,7 @@ import (
 
 	"sigs.k8s.io/kueue/pkg/resources"
 	utilpod "sigs.k8s.io/kueue/pkg/util/pod"
+	utiltas "sigs.k8s.io/kueue/pkg/util/tas"
 )
 
 // nonTasUsageCache caches pod usage, to avoid
@@ -34,11 +35,75 @@ type nonTasUsageCache struct {
 	podUsage  map[types.NamespacedName]podUsageValue
 	nodeUsage map[string]resources.Requests // pre-aggregated per-node totals
 	lock      sync.RWMutex
+	// Remote partitions reuse the local accumulator without changing Pod names.
+	remote map[string]*nonTasUsageCache
+}
+
+func (n *nonTasUsageCache) updateWithCluster(cluster string, pod *corev1.Pod, log logr.Logger) utiltas.NodeKey {
+	if cluster == "" {
+		return utiltas.NodeKey{Name: n.update(pod, log)}
+	}
+	n.lock.Lock()
+	if n.remote == nil {
+		n.remote = make(map[string]*nonTasUsageCache)
+	}
+	cache := n.remote[cluster]
+	if cache == nil {
+		cache = &nonTasUsageCache{
+			podUsage:  make(map[types.NamespacedName]podUsageValue),
+			nodeUsage: make(map[string]resources.Requests),
+		}
+		n.remote[cluster] = cache
+	}
+	n.lock.Unlock()
+	return utiltas.NodeKey{Cluster: cluster, Name: cache.update(pod, log)}
+}
+
+func (n *nonTasUsageCache) deleteWithCluster(cluster string, key client.ObjectKey, log logr.Logger) utiltas.NodeKey {
+	if cluster == "" {
+		return utiltas.NodeKey{Name: n.delete(key, log)}
+	}
+	n.lock.RLock()
+	cache := n.remote[cluster]
+	n.lock.RUnlock()
+	if cache == nil {
+		return utiltas.NodeKey{}
+	}
+	return utiltas.NodeKey{Cluster: cluster, Name: cache.delete(key, log)}
+}
+
+func (n *nonTasUsageCache) deleteCluster(cluster string) {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	delete(n.remote, cluster)
+}
+
+func (n *nonTasUsageCache) forEachClusterNodeUsage(fn func(utiltas.NodeKey, resources.Requests)) {
+	n.lock.RLock()
+	defer n.lock.RUnlock()
+	for node, usage := range n.nodeUsage {
+		fn(utiltas.NodeKey{Name: node}, usage)
+	}
+	for cluster, cache := range n.remote {
+		cache.forEachNodeUsage(func(node string, usage resources.Requests) {
+			fn(utiltas.NodeKey{Cluster: cluster, Name: node}, usage)
+		})
+	}
 }
 
 type podUsageValue struct {
 	node  string
 	usage resources.Requests
+}
+
+// BelongsToNonTASCache reports whether a Pod's resource usage must be tracked
+// in the TAS cache as non-TAS (external) usage on its node: it is scheduled,
+// not managed by TAS itself, and not terminated.
+func BelongsToNonTASCache(pod *corev1.Pod) bool {
+	if pod == nil || utiltas.IsTAS(pod) || len(pod.Spec.NodeName) == 0 {
+		return false
+	}
+	return !utilpod.IsTerminated(pod)
 }
 
 // removePodUsage removes a pod entry and its node usage from the cache.

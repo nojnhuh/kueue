@@ -155,6 +155,18 @@ func (t *tasCache) DeleteNonTASUsageByKey(key client.ObjectKey, log logr.Logger)
 	return t.nonTasUsageCache.delete(key, log)
 }
 
+func (t *tasCache) UpdateNonTASUsageWithCluster(cluster string, pod *corev1.Pod, log logr.Logger) utiltas.NodeKey {
+	return t.nonTasUsageCache.updateWithCluster(cluster, pod, log)
+}
+
+func (t *tasCache) DeleteNonTASUsageByKeyWithCluster(cluster string, key client.ObjectKey, log logr.Logger) utiltas.NodeKey {
+	return t.nonTasUsageCache.deleteWithCluster(cluster, key, log)
+}
+
+func (t *tasCache) DeleteNonTASUsageByCluster(cluster string) {
+	t.nonTasUsageCache.deleteCluster(cluster)
+}
+
 // TrackPod notifies the scheduling simulator that a pod is running on a node.
 func (t *tasCache) TrackPod(ctx context.Context, pod *corev1.Pod) {
 	t.schedulingSimulator.TrackPod(ctx, pod)

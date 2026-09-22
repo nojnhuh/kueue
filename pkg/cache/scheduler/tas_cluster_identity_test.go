@@ -20,9 +20,11 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/constants"
@@ -145,6 +147,81 @@ func TestNodesCacheClusterIsolation(t *testing.T) {
 			}
 			if diff := cmp.Diff(want, got); diff != "" {
 				t.Errorf("nodes mismatch (-want,+got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestNonTASUsageClusterIsolation(t *testing.T) {
+	cases := map[string]struct {
+		action func(*nonTasUsageCache, logr.Logger)
+		wantA  map[string]int64
+	}{
+		"same Pod identity on three clusters": {wantA: map[string]int64{"node-0": 2000}},
+		"delete one Pod": {
+			action: func(cache *nonTasUsageCache, log logr.Logger) {
+				cache.deleteWithCluster("worker1", client.ObjectKey{Namespace: "ns", Name: "pod"}, log)
+			},
+		},
+		"resize one Pod": {
+			action: func(cache *nonTasUsageCache, log logr.Logger) {
+				cache.updateWithCluster("worker1", makePod("pod", "ns", "node-0", "4"), log)
+			},
+			wantA: map[string]int64{"node-0": 4000},
+		},
+		"move one Pod": {
+			action: func(cache *nonTasUsageCache, log logr.Logger) {
+				cache.updateWithCluster("worker1", makePod("pod", "ns", "node-1", "2"), log)
+			},
+			wantA: map[string]int64{"node-1": 2000},
+		},
+		"terminate one Pod": {
+			action: func(cache *nonTasUsageCache, log logr.Logger) {
+				pod := makePod("pod", "ns", "node-0", "2")
+				pod.Status.Phase = corev1.PodSucceeded
+				cache.updateWithCluster("worker1", pod, log)
+			},
+		},
+		"remove one worker": {
+			action: func(cache *nonTasUsageCache, _ logr.Logger) { cache.deleteCluster("worker1") },
+		},
+		"reconnect and replay": {
+			action: func(cache *nonTasUsageCache, log logr.Logger) {
+				cache.deleteCluster("worker1")
+				for range 2 {
+					cache.updateWithCluster("worker1", makePod("pod", "ns", "node-0", "1"), log)
+				}
+			},
+			wantA: map[string]int64{"node-0": 1000},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, log := utiltesting.ContextWithLog(t)
+			cache := &nonTasUsageCache{
+				podUsage: make(map[client.ObjectKey]podUsageValue), nodeUsage: make(map[string]resources.Requests),
+			}
+			cache.update(makePod("pod", "ns", "node-0", "1"), log)
+			cache.updateWithCluster("worker1", makePod("pod", "ns", "node-0", "2"), log)
+			cache.updateWithCluster("worker2", makePod("pod", "ns", "node-0", "3"), log)
+			if tc.action != nil {
+				tc.action(cache, log)
+			}
+			got := make(map[utiltas.NodeKey]int64)
+			cache.forEachClusterNodeUsage(func(node utiltas.NodeKey, usage resources.Requests) {
+				got[node] = usage.ResourceValue(corev1.ResourceCPU)
+				if pods := usage.ResourceValue(corev1.ResourcePods); pods != 1 {
+					t.Errorf("node %v has %d Pods, want 1", node, pods)
+				}
+			})
+			want := map[utiltas.NodeKey]int64{
+				{Name: "node-0"}: 1000, {Cluster: "worker2", Name: "node-0"}: 3000,
+			}
+			for node, cpu := range tc.wantA {
+				want[utiltas.NodeKey{Cluster: "worker1", Name: node}] = cpu
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("node usage mismatch (-want,+got):\n%s", diff)
 			}
 		})
 	}
