@@ -80,11 +80,12 @@ type centralizedTASFixture struct {
 }
 
 type managerCQSpec struct {
-	name      string
-	generated bool
-	cpu       string
-	memory    string
-	cohort    kueue.CohortReference
+	name             string
+	generated        bool
+	cpu              string
+	memory           string
+	cohort           kueue.CohortReference
+	enablePreemption bool
 }
 
 func setupCentralizedTASFixture(cqs ...managerCQSpec) *centralizedTASFixture {
@@ -177,6 +178,11 @@ func setupCentralizedTASFixture(cqs ...managerCQSpec) *centralizedTASFixture {
 		}
 		if spec.cohort != "" {
 			cq.Spec.CohortName = spec.cohort
+		}
+		if spec.enablePreemption {
+			cq.Spec.Preemption = &kueue.ClusterQueuePreemption{
+				WithinClusterQueue: kueue.PreemptionPolicyLowerPriority,
+			}
 		}
 		util.CreateClusterQueuesAndWaitForActive(ctx, k8sManagerClient, cq)
 		f.managerCQs = append(f.managerCQs, cq)
@@ -314,6 +320,34 @@ func createTASJobWithWPC(name, ns, lqName, wpc string, parallelism int32, cpu st
 	return w.PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, corev1.LabelHostname).Obj()
 }
 
+func createWorkloadPriorityClasses(f *centralizedTASFixture) (high, low *kueue.WorkloadPriorityClass) {
+	ginkgo.GinkgoHelper()
+	high = utiltestingapi.MakeWorkloadPriorityClass("high-" + f.managerNs.Name).
+		PriorityValue(100).
+		Obj()
+	low = utiltestingapi.MakeWorkloadPriorityClass("low-" + f.managerNs.Name).
+		PriorityValue(10).
+		Obj()
+	for _, cl := range []client.Client{k8sManagerClient, k8sWorker1Client, k8sWorker2Client} {
+		util.MustCreate(ctx, cl, high.DeepCopy())
+		util.MustCreate(ctx, cl, low.DeepCopy())
+	}
+	return high, low
+}
+
+func waitForWorkloadOnCluster(wlKey types.NamespacedName, clusterName string) {
+	ginkgo.GinkgoHelper()
+	gomega.Eventually(func(g gomega.Gomega) {
+		wl := &kueue.Workload{}
+		g.Expect(k8sManagerClient.Get(ctx, wlKey, wl)).To(gomega.Succeed())
+		g.Expect(wl.Status.ClusterName).NotTo(gomega.BeNil())
+		g.Expect(*wl.Status.ClusterName).To(gomega.Equal(clusterName))
+		cond := apimeta.FindStatusCondition(wl.Status.Conditions, kueue.WorkloadAdmitted)
+		g.Expect(cond).NotTo(gomega.BeNil())
+		g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionTrue))
+	}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+}
+
 func workloadKeyForJob(job *batchv1.Job) types.NamespacedName {
 	return types.NamespacedName{
 		Name:      workloadjob.GetWorkloadNameForJob(job.Name, job.UID),
@@ -440,4 +474,28 @@ func waitForJobManagedByMultiKueue(job *batchv1.Job) {
 		g.Expect(k8sManagerClient.Get(ctx, client.ObjectKeyFromObject(job), created)).To(gomega.Succeed())
 		g.Expect(ptr.Deref(created.Spec.ManagedBy, "")).To(gomega.BeEquivalentTo(kueue.MultiKueueControllerName))
 	}, util.Timeout, util.Interval).Should(gomega.Succeed())
+}
+
+func workerNsName(fixture *centralizedTASFixture, clusterName string) string {
+	if clusterName == fixture.workerCluster1.Name {
+		return fixture.worker1Ns.Name
+	}
+	return fixture.worker2Ns.Name
+}
+
+func hogTASNodeLeavingRoomFor(fixture *centralizedTASFixture, clusterName string, reserve resource.Quantity, hogName string) {
+	ginkgo.GinkgoHelper()
+	wc := fixture.workers[clusterName].client
+	node := getTASWorkerNode(wc)
+	hogCPU := cpuRequestToSaturateNode(wc, node, reserve)
+	createNonTASPodOnNode(wc, workerNsName(fixture, clusterName), hogName, node.Name, hogCPU)
+}
+
+func waitForWorkerPodsInNamespace(workerClient client.Client, ns string) {
+	ginkgo.GinkgoHelper()
+	gomega.Eventually(func(g gomega.Gomega) {
+		pods := &corev1.PodList{}
+		g.Expect(workerClient.List(ctx, pods, client.InNamespace(ns))).To(gomega.Succeed())
+		g.Expect(pods.Items).NotTo(gomega.BeEmpty())
+	}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
 }

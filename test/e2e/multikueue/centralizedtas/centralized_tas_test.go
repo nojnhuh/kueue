@@ -23,13 +23,16 @@ import (
 	"github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	"sigs.k8s.io/kueue/pkg/workload"
+	workloadevict "sigs.k8s.io/kueue/pkg/workload/evict"
 	"sigs.k8s.io/kueue/test/util"
 )
 
@@ -281,5 +284,181 @@ var _ = ginkgo.Describe("Centralized TAS placement invariants", ginkgo.Label("ar
 			g.Expect(fixture.workers[otherCluster].client.List(ctx, pods, client.InNamespace(fixture.managerNs.Name))).To(gomega.Succeed())
 			g.Expect(pods.Items).To(gomega.BeEmpty())
 		}, util.ShortConsistentDuration, util.ShortInterval).Should(gomega.Succeed())
+	})
+})
+
+var _ = ginkgo.Describe("Centralized TAS preemption", ginkgo.Label("area:multikueue", "feature:centralizedtas", "feature:tas"), func() {
+	var (
+		fixture   *centralizedTASFixture
+		managerLq *kueue.LocalQueue
+		highWPC   *kueue.WorkloadPriorityClass
+		lowWPC    *kueue.WorkloadPriorityClass
+		lowPodCPU string
+	)
+
+	ginkgo.BeforeEach(func() {
+		lowCPU := smallestTASNodeCPU(k8sWorker1Client, k8sWorker2Client)
+		lowCPU.SetMilli(lowCPU.MilliValue()/2 + 1)
+		lowPodCPU = lowCPU.String()
+		lowWorkloadsCPU := lowCPU.DeepCopy()
+		lowWorkloadsCPU.Add(lowCPU)
+		fixture = setupCentralizedTASFixture(managerCQSpec{
+			generated:        true,
+			cpu:              lowWorkloadsCPU.String(),
+			memory:           "1000Gi",
+			enablePreemption: true,
+		})
+		managerLq = createManagerLQ(fixture, fixture.managerCQs[0].Name, "user-queue")
+		highWPC, lowWPC = createWorkloadPriorityClasses(fixture)
+	})
+
+	ginkgo.AfterEach(func() {
+		if highWPC != nil && lowWPC != nil {
+			for _, cl := range []client.Client{k8sManagerClient, k8sWorker1Client, k8sWorker2Client} {
+				util.ExpectObjectToBeDeletedWithTimeout(ctx, cl, highWPC, true, util.MediumTimeout)
+				util.ExpectObjectToBeDeletedWithTimeout(ctx, cl, lowWPC, true, util.MediumTimeout)
+			}
+		}
+		if fixture != nil {
+			cleanupCentralizedTASFixture(fixture)
+		}
+	})
+
+	ginkgo.It("should preempt topology-correctly on only the worker cluster where the high job lands", func() {
+		const (
+			lowParallelism  int32 = 1
+			highParallelism int32 = 2
+			highPodCPU            = "1"
+		)
+		reserveForHog := resource.MustParse(highPodCPU)
+
+		lowJob1 := createTASJobWithWPC("low-a", fixture.managerNs.Name, managerLq.Name, lowWPC.Name, lowParallelism, lowPodCPU)
+		util.MustCreate(ctx, k8sManagerClient, lowJob1)
+		waitForJobManagedByMultiKueue(lowJob1)
+		lowWlKey1 := workloadKeyForJob(lowJob1)
+
+		var lowCluster1 string
+		ginkgo.By("waiting for the first low gang to land on a worker", func() {
+			gomega.Eventually(func(g gomega.Gomega) {
+				wl := &kueue.Workload{}
+				g.Expect(k8sManagerClient.Get(ctx, lowWlKey1, wl)).To(gomega.Succeed())
+				g.Expect(wl.Status.ClusterName).NotTo(gomega.BeNil())
+				g.Expect(wl.Status.Conditions).To(utiltesting.HaveConditionStatusTrue(kueue.WorkloadAdmitted))
+				lowCluster1 = *wl.Status.ClusterName
+			}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+		})
+
+		lowJob2 := createTASJobWithWPC("low-b", fixture.managerNs.Name, managerLq.Name, lowWPC.Name, lowParallelism, lowPodCPU)
+		util.MustCreate(ctx, k8sManagerClient, lowJob2)
+		waitForJobManagedByMultiKueue(lowJob2)
+		lowWlKey2 := workloadKeyForJob(lowJob2)
+
+		var lowCluster2 string
+		ginkgo.By("waiting for the second low gang to land on the other worker", func() {
+			gomega.Eventually(func(g gomega.Gomega) {
+				wl := &kueue.Workload{}
+				g.Expect(k8sManagerClient.Get(ctx, lowWlKey2, wl)).To(gomega.Succeed())
+				g.Expect(wl.Status.ClusterName).NotTo(gomega.BeNil())
+				g.Expect(wl.Status.Conditions).To(utiltesting.HaveConditionStatusTrue(kueue.WorkloadAdmitted))
+				lowCluster2 = *wl.Status.ClusterName
+				g.Expect(lowCluster2).NotTo(gomega.Equal(lowCluster1))
+			}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+		})
+
+		ginkgo.By("saturating both worker TAS nodes with non-TAS hogs so the high gang needs preemption", func() {
+			expectWorkerPodsHostPinned(
+				fixture.workers[lowCluster1].client,
+				fixture.managerNs.Name,
+				lowJob1.Name,
+				getTASWorkerNode(fixture.workers[lowCluster1].client).Name,
+				1,
+			)
+			expectWorkerPodsHostPinned(
+				fixture.workers[lowCluster2].client,
+				fixture.managerNs.Name,
+				lowJob2.Name,
+				getTASWorkerNode(fixture.workers[lowCluster2].client).Name,
+				1,
+			)
+			hogTASNodeLeavingRoomFor(fixture, lowCluster1, reserveForHog, "hog-a")
+			hogTASNodeLeavingRoomFor(fixture, lowCluster2, reserveForHog, "hog-b")
+			waitForWorkerPodsInNamespace(fixture.workers[lowCluster1].client, workerNsName(fixture, lowCluster1))
+			waitForWorkerPodsInNamespace(fixture.workers[lowCluster2].client, workerNsName(fixture, lowCluster2))
+		})
+
+		highJob := createTASJobWithWPC("high-gang", fixture.managerNs.Name, managerLq.Name, highWPC.Name, highParallelism, highPodCPU)
+		util.MustCreate(ctx, k8sManagerClient, highJob)
+		waitForJobManagedByMultiKueue(highJob)
+		highWlKey := workloadKeyForJob(highJob)
+
+		var (
+			chosenCluster      string
+			evictedWlKey       types.NamespacedName
+			unaffectedWlKey    types.NamespacedName
+			unaffectedWorker   client.Client
+			chosenWorkerClient client.Client
+		)
+
+		lowByCluster := map[string]types.NamespacedName{
+			lowCluster1: lowWlKey1,
+			lowCluster2: lowWlKey2,
+		}
+
+		ginkgo.By("waiting for the high-priority gang to be admitted on exactly one worker", func() {
+			gomega.Eventually(func(g gomega.Gomega) {
+				var admittedOn []string
+				for clusterName, wc := range fixture.workers {
+					if clusterName == "" {
+						continue
+					}
+					wl := &kueue.Workload{}
+					if wc.client.Get(ctx, highWlKey, wl) != nil {
+						continue
+					}
+					g.Expect(wl.Status.Conditions).To(utiltesting.HaveConditionStatusTrue(kueue.WorkloadAdmitted))
+					admittedOn = append(admittedOn, clusterName)
+				}
+				g.Expect(admittedOn).To(gomega.HaveLen(1))
+				chosenCluster = admittedOn[0]
+				evictedWlKey = lowByCluster[chosenCluster]
+				for cluster, wlKey := range lowByCluster {
+					if cluster != chosenCluster {
+						unaffectedWlKey = wlKey
+						unaffectedWorker = fixture.workers[cluster].client
+						break
+					}
+				}
+				chosenWorkerClient = fixture.workers[chosenCluster].client
+				g.Expect(evictedWlKey.Name).NotTo(gomega.BeEmpty())
+				g.Expect(unaffectedWlKey.Name).NotTo(gomega.BeEmpty())
+			}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+		})
+
+		ginkgo.By("checking the manager pinned the high gang to the chosen worker cluster", func() {
+			waitForWorkloadOnCluster(highWlKey, chosenCluster)
+		})
+
+		ginkgo.By("checking only the victim on the chosen worker was preempted", func() {
+			gomega.Eventually(func(g gomega.Gomega) {
+				evictedWl := &kueue.Workload{}
+				g.Expect(k8sManagerClient.Get(ctx, evictedWlKey, evictedWl)).To(gomega.Succeed())
+				cond := apimeta.FindStatusCondition(evictedWl.Status.Conditions, kueue.WorkloadEvicted)
+				g.Expect(cond).NotTo(gomega.BeNil())
+				g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionTrue))
+				g.Expect(cond.Reason).To(gomega.Equal(kueue.WorkloadPreempted))
+			}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+			gomega.Consistently(func(g gomega.Gomega) {
+				unaffectedWl := &kueue.Workload{}
+				g.Expect(k8sManagerClient.Get(ctx, unaffectedWlKey, unaffectedWl)).To(gomega.Succeed())
+				g.Expect(workloadevict.IsEvicted(unaffectedWl)).To(gomega.BeFalse())
+				g.Expect(unaffectedWorker.Get(ctx, unaffectedWlKey, unaffectedWl)).To(gomega.Succeed())
+				g.Expect(workloadevict.IsEvicted(unaffectedWl)).To(gomega.BeFalse())
+			}, util.ShortConsistentDuration, util.ShortInterval).Should(gomega.Succeed())
+		})
+
+		ginkgo.By("checking the high gang is host-pinned on the chosen worker", func() {
+			tasNode := getTASWorkerNode(chosenWorkerClient)
+			expectWorkerPodsHostPinned(chosenWorkerClient, fixture.managerNs.Name, highJob.Name, tasNode.Name, int(highParallelism))
+		})
 	})
 })
