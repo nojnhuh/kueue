@@ -510,13 +510,14 @@ func TestClusterQueueUpdateWithAdmissionCheck(t *testing.T) {
 
 func TestClusterQueueReadinessWithTAS(t *testing.T) {
 	cases := []struct {
-		name         string
-		skipTopology bool
-		cq           *kueue.ClusterQueue
-		updatedCq    *kueue.ClusterQueue
-		wantStatus   metrics.ClusterQueueStatus
-		wantReason   string
-		wantMessage  string
+		name           string
+		skipTopology   bool
+		centralizedTAS bool
+		cq             *kueue.ClusterQueue
+		updatedCq      *kueue.ClusterQueue
+		wantStatus     metrics.ClusterQueueStatus
+		wantReason     string
+		wantMessage    string
 	}{
 		{
 			name: "TAS CQ goes active state",
@@ -588,6 +589,34 @@ func TestClusterQueueReadinessWithTAS(t *testing.T) {
 			wantMessage: "Can admit new workloads",
 		},
 		{
+			name:         "MultiKueue without centralized TAS does not require manager topology",
+			skipTopology: true,
+			cq: utiltestingapi.MakeClusterQueue("cq").
+				ResourceGroup(*utiltestingapi.MakeFlavorQuotas("tas-flavor").Resource("example.com/gpu", "5").Obj()).
+				AdmissionChecks("mk-check").Obj(),
+			wantReason:  kueue.ClusterQueueActiveReasonReady,
+			wantMessage: "Can admit new workloads",
+		},
+		{
+			name:           "centralized MultiKueue requires manager topology",
+			skipTopology:   true,
+			centralizedTAS: true,
+			cq: utiltestingapi.MakeClusterQueue("cq").
+				ResourceGroup(*utiltestingapi.MakeFlavorQuotas("tas-flavor").Resource("example.com/gpu", "5").Obj()).
+				AdmissionChecks("mk-check").Obj(),
+			wantReason:  kueue.ClusterQueueActiveReasonTopologyNotFound,
+			wantMessage: `Can't admit new workloads: there is no Topology "example-topology" for TAS flavor "tas-flavor".`,
+		},
+		{
+			name:           "centralized MultiKueue is ready with manager topology",
+			centralizedTAS: true,
+			cq: utiltestingapi.MakeClusterQueue("cq").
+				ResourceGroup(*utiltestingapi.MakeFlavorQuotas("tas-flavor").Resource("example.com/gpu", "5").Obj()).
+				AdmissionChecks("mk-check").Obj(),
+			wantReason:  kueue.ClusterQueueActiveReasonReady,
+			wantMessage: "Can admit new workloads",
+		},
+		{
 			name:         "Referenced TAS flavor without topology",
 			skipTopology: true,
 			cq: utiltestingapi.MakeClusterQueue("cq").
@@ -603,6 +632,8 @@ func TestClusterQueueReadinessWithTAS(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			features.SetFeatureGateDuringTest(t, features.TopologyAwareScheduling, true)
+			features.SetFeatureGateDuringTest(t, features.MultiKueueCentralizedTAS, tc.centralizedTAS)
 			ctx, log := utiltesting.ContextWithLog(t)
 
 			clientBuilder := utiltesting.NewClientBuilder()

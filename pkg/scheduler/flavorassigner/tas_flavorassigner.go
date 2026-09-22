@@ -102,8 +102,11 @@ func podSetTopologyRequest(psAssignment *PodSetAssignment,
 	if err != nil {
 		return nil, err
 	}
-	if cq.HasMultiKueueAdmissionCheck() || (!workload.HasQuotaReservation(wl.Obj) && cq.HasProvRequestAdmissionCheck(*tasFlvr)) {
-		// Delay TAS when MultiKueue is used (topology always assigned on worker cluster).
+	if (cq.HasMultiKueueAdmissionCheck() && !features.Enabled(features.MultiKueueCentralizedTAS)) ||
+		(!workload.HasQuotaReservation(wl.Obj) && cq.HasProvRequestAdmissionCheck(*tasFlvr)) {
+		// Delay TAS when MultiKueue is used without centralized TAS. Worker
+		// clusters assign topology.
+		//
 		// For ProvisioningRequest, delay TAS on first scheduling pass only (topology assigned after provisioning).
 		psAssignment.DelayedTopologyRequest = new(kueue.DelayedTopologyRequestStatePending)
 		return nil, nil

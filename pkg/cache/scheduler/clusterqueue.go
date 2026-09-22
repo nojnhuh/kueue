@@ -381,8 +381,8 @@ func (c *clusterQueue) isTASViolated() bool {
 	if !features.Enabled(features.TopologyAwareScheduling) || len(c.tasFlavors) == 0 {
 		return false
 	}
-	// Skip TAS cache validation when MultiKueue is enabled; topology runs on worker clusters.
-	if c.hasMultiKueueAdmissionCheck() {
+	// Only conventional MultiKueue delegates topology assignment to workers.
+	if c.hasMultiKueueAdmissionCheck() && !features.Enabled(features.MultiKueueCentralizedTAS) {
 		return false
 	}
 	if !c.isTASInitialized() {
