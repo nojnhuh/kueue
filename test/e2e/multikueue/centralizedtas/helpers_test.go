@@ -84,6 +84,7 @@ type managerCQSpec struct {
 	generated bool
 	cpu       string
 	memory    string
+	cohort    kueue.CohortReference
 }
 
 func setupCentralizedTASFixture(cqs ...managerCQSpec) *centralizedTASFixture {
@@ -173,6 +174,9 @@ func setupCentralizedTASFixture(cqs ...managerCQSpec) *centralizedTASFixture {
 					Obj()).
 				AdmissionChecks(kueue.AdmissionCheckReference(f.multiKueueAc.Name)).
 				Obj()
+		}
+		if spec.cohort != "" {
+			cq.Spec.CohortName = spec.cohort
 		}
 		util.CreateClusterQueuesAndWaitForActive(ctx, k8sManagerClient, cq)
 		f.managerCQs = append(f.managerCQs, cq)
@@ -382,6 +386,13 @@ func expectWorkerPodsHostPinned(workerClient client.Client, ns, jobName, expecte
 	}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
 }
 
+func terminateJobPods(f *centralizedTASFixture, clusterName, ns, jobName string, count int) {
+	ginkgo.GinkgoHelper()
+	wc := f.workers[clusterName]
+	listOpts := util.GetListOptsFromLabel(fmt.Sprintf("%s=%s", batchv1.JobNameLabel, jobName))
+	util.WaitForActivePodsAndTerminate(ctx, wc.client, wc.restClient, wc.cfg, ns, count, 0, listOpts)
+}
+
 func cleanupCentralizedTASFixture(f *centralizedTASFixture) {
 	ginkgo.GinkgoHelper()
 	gomega.Expect(util.DeleteNamespace(ctx, k8sManagerClient, f.managerNs)).To(gomega.Succeed())
@@ -407,6 +418,19 @@ func cleanupCentralizedTASFixture(f *centralizedTASFixture) {
 	util.ExpectAllPodsInNamespaceDeleted(ctx, k8sManagerClient, f.managerNs)
 	util.ExpectAllPodsInNamespaceDeleted(ctx, k8sWorker1Client, f.worker1Ns)
 	util.ExpectAllPodsInNamespaceDeleted(ctx, k8sWorker2Client, f.worker2Ns)
+}
+
+func waitForClusterQueueWeightedShare(cqName string, cmp string, value int64) int64 {
+	ginkgo.GinkgoHelper()
+	var share int64
+	gomega.Eventually(func(g gomega.Gomega) {
+		cq := &kueue.ClusterQueue{}
+		g.Expect(k8sManagerClient.Get(ctx, client.ObjectKey{Name: cqName}, cq)).To(gomega.Succeed())
+		g.Expect(cq.Status.FairSharing).NotTo(gomega.BeNil())
+		share = cq.Status.FairSharing.WeightedShare
+		g.Expect(share).To(gomega.BeNumerically(cmp, value))
+	}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+	return share
 }
 
 func waitForJobManagedByMultiKueue(job *batchv1.Job) {

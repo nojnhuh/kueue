@@ -24,6 +24,10 @@ integrations:
   - "pod"
 featureGates:
   MultiKueueCentralizedTAS: true
+fairSharing:
+  preemptionStrategies:
+  - LessThanOrEqualToFinalShare
+  - LessThanInitialShare
 tls:
   minVersion: "VersionTLS12"
   cipherSuites:

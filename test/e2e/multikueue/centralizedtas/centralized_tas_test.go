@@ -17,8 +17,11 @@ limitations under the License.
 package centralizedtas
 
 import (
+	"fmt"
+
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -152,6 +155,86 @@ var _ = ginkgo.Describe("Centralized TAS", ginkgo.Label("area:multikueue", "feat
 
 		wlKey := workloadKeyForJob(job)
 		expectWorkloadNotAdmitted(wlKey)
+	})
+})
+
+var _ = ginkgo.Describe("Centralized TAS fair sharing", ginkgo.Label("area:multikueue", "feature:centralizedtas", "feature:fairsharing", "feature:tas"), func() {
+	var (
+		fixture *centralizedTASFixture
+		cohort  kueue.CohortReference
+		teamACQ *kueue.ClusterQueue
+		teamBCQ *kueue.ClusterQueue
+		teamALq *kueue.LocalQueue
+		teamBLq *kueue.LocalQueue
+	)
+
+	ginkgo.BeforeEach(func() {
+		cohort = kueue.CohortReference("centralized-tas-cohort")
+		fixture = setupCentralizedTASFixture(
+			managerCQSpec{name: "team-a", cpu: "1", memory: "1Gi", cohort: cohort},
+			managerCQSpec{name: "team-b", cpu: "3", memory: "3Gi", cohort: cohort},
+		)
+		for _, cq := range fixture.managerCQs {
+			switch cq.Name {
+			case "team-a":
+				teamACQ = cq
+			case "team-b":
+				teamBCQ = cq
+			}
+		}
+		teamALq = createManagerLQ(fixture, teamACQ.Name, "team-a")
+		teamBLq = createManagerLQ(fixture, teamBCQ.Name, "team-b")
+	})
+
+	ginkgo.AfterEach(func() {
+		cleanupCentralizedTASFixture(fixture)
+	})
+
+	ginkgo.It("should reduce high borrowing as workloads finish across worker clusters", func() {
+		var teamAJobs []*batchv1.Job
+		ginkgo.By("team-a submits workloads that borrow from the cohort", func() {
+			for i := range 3 {
+				job := createTASJob(fmt.Sprintf("team-a-%d", i), fixture.managerNs.Name, teamALq.Name, 2, "500m")
+				util.MustCreate(ctx, k8sManagerClient, job)
+				waitForJobManagedByMultiKueue(job)
+				teamAJobs = append(teamAJobs, job)
+			}
+		})
+
+		ginkgo.By("waiting for team-a to enter high borrowing", func() {
+			waitForClusterQueueWeightedShare(teamACQ.Name, ">", 100)
+		})
+		peakBorrowing := waitForClusterQueueWeightedShare(teamACQ.Name, ">=", 100)
+
+		ginkgo.By("team-b also gets admitted work on the global pool", func() {
+			job := createTASJob("team-b-0", fixture.managerNs.Name, teamBLq.Name, 1, "500m")
+			util.MustCreate(ctx, k8sManagerClient, job)
+			waitForJobManagedByMultiKueue(job)
+			util.ExpectWorkloadsToBeAdmittedByKeys(ctx, k8sManagerClient, workloadKeyForJob(job))
+		})
+
+		ginkgo.By("finishing team-a workloads on both worker clusters", func() {
+			for _, job := range teamAJobs {
+				wlKey := workloadKeyForJob(job)
+				clusterName, _ := waitForManagerCentralizedAdmission(wlKey)
+				terminateJobPods(fixture, clusterName, fixture.managerNs.Name, job.Name, 2)
+				gomega.Eventually(func(g gomega.Gomega) {
+					wl := &kueue.Workload{}
+					g.Expect(k8sManagerClient.Get(ctx, wlKey, wl)).To(gomega.Succeed())
+					g.Expect(wl.Status.Conditions).To(utiltesting.HaveConditionStatusTrueAndReason(kueue.WorkloadFinished, kueue.WorkloadFinishedReasonSucceeded))
+				}, util.VeryLongTimeout, util.Interval).Should(gomega.Succeed())
+			}
+		})
+
+		ginkgo.By("expecting team-a borrowing to drop as capacity returns to the cohort", func() {
+			gomega.Eventually(func(g gomega.Gomega) {
+				cq := &kueue.ClusterQueue{}
+				g.Expect(k8sManagerClient.Get(ctx, client.ObjectKeyFromObject(teamACQ), cq)).To(gomega.Succeed())
+				g.Expect(cq.Status.FairSharing).NotTo(gomega.BeNil())
+				g.Expect(cq.Status.FairSharing.WeightedShare).To(gomega.BeNumerically("<", peakBorrowing))
+				g.Expect(cq.Status.AdmittedWorkloads).To(gomega.Equal(int32(0)))
+			}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+		})
 	})
 })
 
