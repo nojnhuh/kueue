@@ -211,7 +211,7 @@ func (c *TASFlavorCache) snapshot(
 	}
 	snapshot.addTASUsageForHeldDomains(tasDomainUsages)
 	c.nonTasUsageCache.forEachNodeUsage(func(nodeName string, usage resources.Requests) {
-		if domainID, ok := tree.nodeToDomain[nodeName]; ok {
+		if domainID, ok := tree.nodeToDomain[utiltas.NodeKey{Name: nodeName}]; ok {
 			snapshot.addNonTASUsage(domainID, usage)
 		}
 	})
@@ -284,7 +284,7 @@ func (c *TASFlavorCache) updateUsage(topologyRequests []workload.TopologyDomainR
 	c.Lock()
 	defer c.Unlock()
 	for _, tr := range topologyRequests {
-		domainID := utiltas.DomainID(tr.Values)
+		domainID := topologyUsageDomainID(c.topology.Levels, tr)
 		_, found := c.usage[domainID]
 		if !found {
 			c.usage[domainID] = resources.NewRequests()

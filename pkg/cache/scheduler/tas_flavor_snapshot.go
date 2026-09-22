@@ -39,6 +39,7 @@ import (
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/cache/scheduler/simulator"
+	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/podset"
 	"sigs.k8s.io/kueue/pkg/resources"
@@ -353,6 +354,17 @@ func (s *TASFlavorSnapshot) usageLevelIdx() int {
 	return len(s.levelKeys) - 1
 }
 
+func topologyUsageDomainID(levels []string, request workload.TopologyDomainRequests) utiltas.TopologyDomainID {
+	if len(levels) > 0 && utiltas.IsLowestLevelHostname(levels) && len(request.Values) > 0 {
+		return utiltas.HostnameDomainID(request.Cluster, request.Values[len(request.Values)-1])
+	}
+	return utiltas.DomainID(request.Values)
+}
+
+func (s *TASFlavorSnapshot) usageDomainID(request workload.TopologyDomainRequests) utiltas.TopologyDomainID {
+	return topologyUsageDomainID(s.levelKeys[:s.usageLevelIdx()+1], request)
+}
+
 // usageDomains returns the domains usage is recorded against, keyed the same
 // way as the TopologyAssignment values.
 func (s *TASFlavorSnapshot) usageDomains() domainByID {
@@ -447,7 +459,7 @@ func (s *TASFlavorSnapshot) domainRemainingCapacity(dom *domain, assumedUsage re
 // removeTASUsage, which means the backing node went away.
 func (s *TASFlavorSnapshot) updateTASUsageForHeldDomains(usage workload.TASFlavorUsage, op usageOp) {
 	for _, tr := range usage {
-		domainID := utiltas.DomainID(tr.Values)
+		domainID := s.usageDomainID(tr)
 		if !s.hasDomain(domainID) {
 			continue
 		}
@@ -600,7 +612,8 @@ type FlavorTASRequests []TASPodSetRequests
 func (s *TASFlavorSnapshot) Fits(flavorUsage workload.TASFlavorUsage) bool {
 	cachingEnabled := features.Enabled(features.TASCachingRemainingResources)
 	for _, domainUsage := range flavorUsage {
-		dom := s.usageDomain(utiltas.DomainID(domainUsage.Values))
+		domainID := s.usageDomainID(domainUsage)
+		dom := s.usageDomain(domainID)
 		if dom == nil {
 			return false
 		}
@@ -960,7 +973,7 @@ func (s *TASFlavorSnapshot) findReplacementAssignment(
 // TopologyAssignment names; a node named after a domain would otherwise share
 // its entry.
 type assumedUsage struct {
-	// perDomain is keyed the way TopologyAssignment values are. With
+	// perDomain uses cluster-qualified host keys or non-leaf domain paths. With
 	// TASHandleOverlappingFlavors it is shared with the sibling flavors, see
 	// WithAggregatedDomainUsages.
 	perDomain map[utiltas.TopologyDomainID]resources.Requests
@@ -982,11 +995,11 @@ func newAssumedUsage(perDomain map[utiltas.TopologyDomainID]resources.Requests) 
 }
 
 // recordLeafUsage adds usage keyed by leaf, allocating on first use.
-func (u *assumedUsage) recordLeafUsage(usagePerDomain map[utiltas.TopologyDomainID]resources.Requests) {
+func (u *assumedUsage) recordLeafUsage(assignment *utiltas.TopologyAssignment, requests resources.Requests) {
 	if u.perLeaf == nil {
-		u.perLeaf = make(map[utiltas.TopologyDomainID]resources.Requests, len(usagePerDomain))
+		u.perLeaf = make(map[utiltas.TopologyDomainID]resources.Requests, len(assignment.Domains))
 	}
-	addUsagePerDomain(u.perLeaf, usagePerDomain)
+	addAssignmentUsage(u.perLeaf, assignment, requests)
 }
 
 // addAssumedUsageForCycle records the usage of an assignment made in this cycle
@@ -997,21 +1010,23 @@ func (u *assumedUsage) recordLeafUsage(usagePerDomain map[utiltas.TopologyDomain
 // taken.
 func addAssumedUsageForCycle(assumedUsage *assumedUsage, published, leaves *utiltas.TopologyAssignment, tr *TASPodSetRequests) {
 	if leaves != nil {
-		assumedUsage.recordLeafUsage(utiltas.ComputeUsagePerDomain(leaves, tr.SinglePodRequests))
+		assumedUsage.recordLeafUsage(leaves, tr.SinglePodRequests)
 	}
 	addAssumedUsage(assumedUsage, published, tr)
 }
 
 func addAssumedUsage(assumedUsage *assumedUsage, ta *utiltas.TopologyAssignment, tr *TASPodSetRequests) {
-	addUsagePerDomain(assumedUsage.perDomain, utiltas.ComputeUsagePerDomain(ta, tr.SinglePodRequests))
+	addAssignmentUsage(assumedUsage.perDomain, ta, tr.SinglePodRequests)
 }
 
-func addUsagePerDomain(tracked map[utiltas.TopologyDomainID]resources.Requests, usagePerDomain map[utiltas.TopologyDomainID]resources.Requests) {
-	for domainID, usage := range usagePerDomain {
+func addAssignmentUsage(tracked map[utiltas.TopologyDomainID]resources.Requests, assignment *utiltas.TopologyAssignment, requests resources.Requests) {
+	for _, domain := range assignment.Domains {
+		domainID := leafDomainID(assignment.Levels, domain.Values)
 		if tracked[domainID] == nil {
 			tracked[domainID] = resources.NewRequests()
 		}
-		tracked[domainID].Add(usage)
+		tracked[domainID].Add(requests.ScaledUp(int64(domain.Count)))
+		tracked[domainID].Add(resources.OnePodRequest.ScaledUp(int64(domain.Count)))
 	}
 }
 
@@ -1071,8 +1086,7 @@ func (s *TASFlavorSnapshot) requiredReplacementDomain(tr *TASPodSetRequests, ta 
 	if len(domainValues) == 0 {
 		return ""
 	}
-	// Look up domain using full DomainID path (e.g., "b2,r1,b2-r1")
-	domain, found := s.domainsPerLevel[nodeLevel][utiltas.DomainID(domainValues)]
+	domain, found := s.domainsPerLevel[nodeLevel][s.leafDomainID(domainValues)]
 	if !found {
 		return ""
 	}
@@ -1098,7 +1112,7 @@ func (s *TASFlavorSnapshot) domainForAssignmentValues(levels, values []string) *
 	if levelIdx >= len(s.domainsPerLevel) {
 		return nil
 	}
-	return s.domainsPerLevel[levelIdx][utiltas.DomainID(values)]
+	return s.domainsPerLevel[levelIdx][leafDomainID(levels, values)]
 }
 
 // IsTopologyAssignmentStale indicates whether the topologyAssignment have Nodes
@@ -1107,7 +1121,13 @@ func (s *TASFlavorSnapshot) domainForAssignmentValues(levels, values []string) *
 func (s *TASFlavorSnapshot) IsTopologyAssignmentStale(ta *utiltas.TopologyAssignment) (bool, string) {
 	for _, domain := range ta.Domains {
 		if s.domainForAssignmentValues(ta.Levels, domain.Values) == nil {
-			return true, domain.Values[0]
+			if len(domain.Values) == 0 {
+				return true, ""
+			}
+			if !s.declaresHostnameLevel() {
+				return true, domain.Values[0]
+			}
+			return true, domain.Values[len(domain.Values)-1]
 		}
 	}
 	return false, ""
@@ -1140,7 +1160,7 @@ func (s *TASFlavorSnapshot) findIncompleteSliceDomain(tr *TASPodSetRequests, ta 
 	nodeLevel := len(s.levelKeys) - 1
 
 	for _, domainFromAssignment := range ta.Domains {
-		domain, ok := s.domainsPerLevel[nodeLevel][utiltas.DomainID(domainFromAssignment.Values)]
+		domain, ok := s.domainsPerLevel[nodeLevel][s.leafDomainID(domainFromAssignment.Values)]
 		if !ok {
 			continue
 		}
@@ -2017,15 +2037,19 @@ func (s *TASFlavorSnapshot) buildTopologyAssignmentForLevels(domains []*domain, 
 func (s *TASFlavorSnapshot) buildAssignment(domains []*domain) (published, leaves *utiltas.TopologyAssignment) {
 	// lex sort domains by their levelValues instead of IDs, as leaves' IDs can only contain the hostname
 	slices.SortFunc(domains, s.compareDomainLevelValues)
+	// Centralized TAS needs the top cluster level to select the worker.
+	isCentralizedTASTopology := features.Enabled(features.MultiKueueCentralizedTAS) &&
+		len(s.levelKeys) > 0 &&
+		s.levelKeys[0] == constants.MultiKueueClusterLabel
 	levelIdx, endIdx := 0, len(s.levelKeys)
 	switch {
 	case s.virtualHostname:
-		leaves = s.buildTopologyAssignmentForLevels(domains, len(s.levelKeys)-1, len(s.levelKeys))
+		leaves = s.buildTopologyAssignmentForLevels(domains, 0, len(s.levelKeys))
 		// Publish at the declared levels; the injected level is internal only.
 		domains = s.rollUpToParents(domains)
 		endIdx = len(s.levelKeys) - 1
 		slices.SortFunc(domains, s.compareDomainLevelValues)
-	case s.declaresHostnameLevel():
+	case s.declaresHostnameLevel() && !isCentralizedTASTopology:
 		// assign only hostname values if topology defines it
 		levelIdx = len(s.levelKeys) - 1
 	}

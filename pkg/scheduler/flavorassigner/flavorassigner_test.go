@@ -4872,6 +4872,36 @@ func TestAssignment_ComputeTASNetUsage(t *testing.T) {
 		prevAdmission *kueue.Admission
 		want          workload.TASUsage
 	}{
+		"preserves worker identity for fresh centralized assignments": {
+			assignment: Assignment{
+				PodSets: []PodSetAssignment{{
+					Name: kueue.DefaultPodSetName,
+					Flavors: ResourceAssignment{
+						corev1.ResourceCPU: {Name: "tas"},
+					},
+					Count: 1,
+					TopologyAssignment: &tas.TopologyAssignment{
+						Levels: []string{constants.MultiKueueClusterLabel, corev1.LabelHostname},
+						Domains: []tas.TopologyDomainAssignment{{
+							Values: []string{"worker1", "node-a"},
+							Count:  1,
+						}},
+					},
+				}},
+			},
+			wl: workload.NewInfo(log, utiltestingapi.MakeWorkload("wl", "ns").
+				PodSets(*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 1).
+					Request(corev1.ResourceCPU, "1").RequiredTopologyRequest(corev1.LabelHostname).Obj()).Obj()),
+			cq: &schdcache.ClusterQueueSnapshot{
+				TASFlavors: map[kueue.ResourceFlavorReference]*schdcache.TASFlavorSnapshot{"tas": {}},
+			},
+			want: workload.TASUsage{
+				"tas": []workload.TopologyDomainRequests{{
+					Values: []string{"worker1", "node-a"}, Cluster: "worker1", Count: 1,
+					SinglePodRequests: resources.NewRequestsFromMap(resources.MapRequests{corev1.ResourceCPU: 1000}),
+				}},
+			},
+		},
 		"records actual pod requests when assignment requests differ": {
 			assignment: Assignment{
 				PodSets: []PodSetAssignment{{

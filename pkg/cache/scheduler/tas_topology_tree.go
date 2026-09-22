@@ -108,9 +108,9 @@ type topologyTree struct {
 	// from.
 	nodes []*corev1.Node
 
-	// nodeToDomain maps node names to their leaf domain ID, used to apply
+	// nodeToDomain maps cluster-qualified node names to their leaf domain ID, used to apply
 	// per-node non-TAS usage onto snapshots.
-	nodeToDomain map[string]utiltas.TopologyDomainID
+	nodeToDomain map[utiltas.NodeKey]utiltas.TopologyDomainID
 }
 
 // newTopologyTree builds the static topology structure from the given node
@@ -138,28 +138,44 @@ func newTopologyTree(levels []string, nodes []*corev1.Node, generation int64) *t
 		domainsPerLevel: domainsPerLevel,
 		virtualHostname: virtual,
 		nodes:           slices.Clip(slices.Clone(nodes)),
-		nodeToDomain:    make(map[string]utiltas.TopologyDomainID, len(nodes)),
+		nodeToDomain:    make(map[utiltas.NodeKey]utiltas.TopologyDomainID, len(nodes)),
 	}
 	for _, node := range nodes {
-		tree.nodeToDomain[node.Name] = tree.addNode(node)
+		tree.nodeToDomain[utiltas.NodeKeyFor(node)] = tree.addNode(node)
 	}
 	tree.initialize()
 	return tree
 }
 
+// leafDomainID returns the cache key for a leaf represented by values.
+// Hostname-level topologies share a cluster-qualified identity across flavors,
+// even when assignments retain different intermediate topology levels.
+func leafDomainID(levels, values []string) utiltas.TopologyDomainID {
+	if len(levels) > 0 && utiltas.IsLowestLevelHostname(levels) && len(values) > 0 {
+		cluster := utiltas.ClusterFromTopology(levels, values)
+		return utiltas.HostnameDomainID(cluster, values[len(values)-1])
+	}
+	return utiltas.DomainID(values)
+}
+
+func (t *topologyTree) leafDomainID(values []string) utiltas.TopologyDomainID {
+	return leafDomainID(t.levelKeys, values)
+}
+
 func (t *topologyTree) addNode(node *corev1.Node) utiltas.TopologyDomainID {
 	levelValues := utiltas.LevelValues(t.levelKeys, node.Labels)
+	key := utiltas.NodeKeyFor(node)
 	var domainID utiltas.TopologyDomainID
 	switch {
 	case t.virtualHostname:
-		// The injected level is internal, so key it by node name, which is
-		// unique. Hostname labels are neither unique nor immutable, and two
+		// The injected level is internal, so key it by cluster and node name.
+		// Hostname labels are neither unique nor immutable, and two
 		// nodes sharing one must not merge into a leaf with pooled capacity.
 		levelValues[len(levelValues)-1] = node.Name
-		domainID = utiltas.TopologyDomainID(node.Name)
+		domainID = utiltas.HostnameDomainID(key.Cluster, node.Name)
 	case t.leafIsNode():
 		// A declared hostname level keeps the label, the user's contract.
-		domainID = utiltas.TopologyDomainID(node.Labels[corev1.LabelHostname])
+		domainID = utiltas.HostnameDomainID(key.Cluster, node.Labels[corev1.LabelHostname])
 	default:
 		domainID = utiltas.DomainID(levelValues)
 	}

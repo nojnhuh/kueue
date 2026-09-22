@@ -330,7 +330,9 @@ type TopologyRequest struct {
 }
 
 type TopologyDomainRequests struct {
-	Values            []string
+	Values []string
+	// Cluster comes from the source assignment, not the consuming flavor's topology.
+	Cluster           string
 	SinglePodRequests resources.Requests
 	// Count indicates how many pods are requested in this TopologyDomain.
 	Count int32
@@ -703,7 +705,10 @@ func (i *Info) TASUsage() TASUsage {
 				psFlavors.Insert(psFlavor)
 			}
 			for psFlavor := range psFlavors {
-				result[psFlavor] = append(result[psFlavor], ps.TopologyRequest.DomainRequests...)
+				for _, request := range ps.TopologyRequest.DomainRequests {
+					request.Cluster = tas.ClusterFromTopology(ps.TopologyRequest.Levels, request.Values)
+					result[psFlavor] = append(result[psFlavor], request)
+				}
 			}
 		}
 	}

@@ -43,6 +43,7 @@ import (
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/cache/scheduler/simulator"
+	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/podset"
 	"sigs.k8s.io/kueue/pkg/resources"
@@ -79,6 +80,135 @@ func newFreeCapacityTestSnapshot(capacities map[tas.TopologyDomainID]leafCapacit
 	return &TASFlavorSnapshot{
 		topologyTree:   &topologyTree{leaves: leaves},
 		leafCapacities: leafCapacities,
+	}
+}
+
+func TestBuildAssignmentLevels(t *testing.T) {
+	const rackLabel = "cloud.provider.com/topology-rack"
+	cases := map[string]struct {
+		enabled         bool
+		virtualHostname bool
+		levels          []string
+		wantLevels      []string
+		wantValues      [][]string
+	}{
+		"hostname-only assignment by default": {
+			levels:     []string{constants.MultiKueueClusterLabel, corev1.LabelHostname},
+			wantLevels: []string{corev1.LabelHostname},
+			wantValues: [][]string{{"node-a"}, {"node-b"}},
+		},
+		"full assignment for centralized TAS": {
+			enabled:    true,
+			levels:     []string{constants.MultiKueueClusterLabel, corev1.LabelHostname},
+			wantLevels: []string{constants.MultiKueueClusterLabel, corev1.LabelHostname},
+			wantValues: [][]string{{"worker1", "node-a"}, {"worker2", "node-b"}},
+		},
+		"hostname-only assignment for other topologies": {
+			enabled:    true,
+			levels:     []string{"cloud.provider.com/zone", corev1.LabelHostname},
+			wantLevels: []string{corev1.LabelHostname},
+			wantValues: [][]string{{"node-a"}, {"node-b"}},
+		},
+		"virtual hostname omitted by default": {
+			virtualHostname: true,
+			levels:          []string{constants.MultiKueueClusterLabel, rackLabel},
+			wantLevels:      []string{constants.MultiKueueClusterLabel, rackLabel},
+			wantValues:      [][]string{{"worker1", "rack-a"}, {"worker2", "rack-b"}},
+		},
+		"virtual hostname omitted for centralized TAS": {
+			enabled:         true,
+			virtualHostname: true,
+			levels:          []string{constants.MultiKueueClusterLabel, rackLabel},
+			wantLevels:      []string{constants.MultiKueueClusterLabel, rackLabel},
+			wantValues:      [][]string{{"worker1", "rack-a"}, {"worker2", "rack-b"}},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			features.SetFeatureGateDuringTest(t, features.MultiKueueCentralizedTAS, tc.enabled)
+			features.SetFeatureGateDuringTest(t, features.TASNodeFeasibilityForAllLevels, tc.virtualHostname)
+
+			tree := newTopologyTree(tc.levels, []*corev1.Node{
+				node.MakeNode("node-a").
+					Label(tc.levels[0], "worker1").
+					Label(rackLabel, "rack-a").
+					Label(corev1.LabelHostname, "node-a").
+					Obj(),
+				node.MakeNode("node-b").
+					Label(tc.levels[0], "worker2").
+					Label(rackLabel, "rack-b").
+					Label(corev1.LabelHostname, "node-b").
+					Obj(),
+			}, 0)
+			snapshot := &TASFlavorSnapshot{
+				topologyTree: tree,
+				domainStates: make([]domainState, tree.domainCount),
+			}
+			domains := []*domain{
+				&tree.leaves[tree.nodeToDomain[tas.NodeKeyFor(tree.nodes[1])]].domain,
+				&tree.leaves[tree.nodeToDomain[tas.NodeKeyFor(tree.nodes[0])]].domain,
+			}
+			for _, domain := range domains {
+				snapshot.domainStateOf(domain).podCount = 1
+			}
+
+			got, leaves := snapshot.buildAssignment(domains)
+			if diff := cmp.Diff(tc.wantLevels, got.Levels); diff != "" {
+				t.Errorf("unexpected levels (-want/+got):\n%s", diff)
+			}
+			gotValues := make([][]string, len(got.Domains))
+			for i := range got.Domains {
+				gotValues[i] = got.Domains[i].Values
+			}
+			if diff := cmp.Diff(tc.wantValues, gotValues); diff != "" {
+				t.Errorf("unexpected domain values (-want/+got):\n%s", diff)
+			}
+			var wantLeaves *tas.TopologyAssignment
+			if tc.virtualHostname {
+				wantLeaves = &tas.TopologyAssignment{
+					Levels: append(slices.Clone(tc.levels), corev1.LabelHostname),
+					Domains: []tas.TopologyDomainAssignment{
+						{Values: []string{"worker1", "rack-a", "node-a"}, Count: 1},
+						{Values: []string{"worker2", "rack-b", "node-b"}, Count: 1},
+					},
+				}
+			}
+			if diff := cmp.Diff(wantLeaves, leaves); diff != "" {
+				t.Errorf("unexpected leaf assignment (-want/+got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestFullHostnamePathFits(t *testing.T) {
+	_, log := utiltesting.ContextWithLog(t)
+	nodeObj := node.MakeNode("node-a").
+		Label(constants.MultiKueueClusterLabel, "worker1").
+		Label(corev1.LabelHostname, "node-a").
+		StatusAllocatable(corev1.ResourceList{
+			corev1.ResourceCPU:  resource.MustParse("2"),
+			corev1.ResourcePods: resource.MustParse("10"),
+		}).
+		Ready().
+		Obj()
+	snapshot := newTASFlavorSnapshot(
+		log,
+		flavorInformation{TopologyName: "tas-topology"},
+		newTopologyTree([]string{constants.MultiKueueClusterLabel, corev1.LabelHostname}, []*corev1.Node{nodeObj}, 0),
+		newDefaultSimulatorSnapshot(),
+	)
+
+	usage := workload.TASFlavorUsage{{
+		Values:  []string{"worker1", "node-a"},
+		Cluster: "worker1",
+		SinglePodRequests: resources.NewRequestsFromMap(map[corev1.ResourceName]int64{
+			corev1.ResourceCPU: 1000,
+		}),
+		Count: 1,
+	}}
+	if !snapshot.Fits(usage) {
+		t.Error("Fits() rejected a full-path assignment for an existing hostname leaf")
 	}
 }
 
@@ -266,6 +396,30 @@ func TestIsTopologyAssignmentStale(t *testing.T) {
 			},
 			wantStale:       true,
 			wantStaleDomain: "n2",
+		},
+		"existing full-path hostname leaf is not stale": {
+			tree: hostnameLowest,
+			assignment: &tas.TopologyAssignment{
+				Levels:  []string{blockLabel, corev1.LabelHostname},
+				Domains: []tas.TopologyDomainAssignment{{Values: []string{"b1", "n1"}}},
+			},
+		},
+		"missing full-path hostname leaf reports hostname": {
+			tree: hostnameLowest,
+			assignment: &tas.TopologyAssignment{
+				Levels:  []string{blockLabel, corev1.LabelHostname},
+				Domains: []tas.TopologyDomainAssignment{{Values: []string{"b1", "n2"}}},
+			},
+			wantStale:       true,
+			wantStaleDomain: "n2",
+		},
+		"empty hostname values are stale": {
+			tree: hostnameLowest,
+			assignment: &tas.TopologyAssignment{
+				Levels:  []string{blockLabel, corev1.LabelHostname},
+				Domains: []tas.TopologyDomainAssignment{{}},
+			},
+			wantStale: true,
 		},
 		"deleted node is stale even when its hostname matches an existing root domain ID": {
 			tree: hostnameLowest,
@@ -1533,7 +1687,7 @@ func TestTASCachingRemainingResourcesFeatureGate(t *testing.T) {
 				Ready().
 				Obj()
 			snapshot := newTASFlavorSnapshot(log, flavorInformation{TopologyName: "tas-topology"}, newTopologyTree([]string{"hostname"}, []*corev1.Node{nodeObj}, 0), newDefaultSimulatorSnapshot())
-			domainID := snapshot.nodeToDomain[nodeObj.Name]
+			domainID := snapshot.nodeToDomain[tas.NodeKeyFor(nodeObj)]
 
 			if snapshot.leaves[domainID] == nil {
 				t.Fatalf("leaves[%q] = nil, want non-nil", domainID)
@@ -1763,9 +1917,10 @@ func TestAssumedUsageRecordsIntoTheSharedDomainMap(t *testing.T) {
 	assumedUsage := newAssumedUsage(shared)
 
 	assumedUsage.perDomain["r1"] = resources.NewRequestsFromMap(map[corev1.ResourceName]int64{corev1.ResourceCPU: 1000})
-	assumedUsage.recordLeafUsage(map[tas.TopologyDomainID]resources.Requests{
-		"n1": resources.NewRequestsFromMap(map[corev1.ResourceName]int64{corev1.ResourceCPU: 2000}),
-	})
+	assumedUsage.recordLeafUsage(&tas.TopologyAssignment{
+		Levels:  []string{corev1.LabelHostname},
+		Domains: []tas.TopologyDomainAssignment{{Values: []string{"n1"}, Count: 1}},
+	}, resources.NewRequestsFromMap(map[corev1.ResourceName]int64{corev1.ResourceCPU: 2000}))
 
 	want := map[tas.TopologyDomainID]resources.Requests{
 		"r1": resources.NewRequestsFromMap(map[corev1.ResourceName]int64{corev1.ResourceCPU: 1000}),

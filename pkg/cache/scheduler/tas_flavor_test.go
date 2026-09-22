@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/resources"
 	utiltas "sigs.k8s.io/kueue/pkg/util/tas"
 	"sigs.k8s.io/kueue/pkg/workload"
@@ -122,6 +123,28 @@ func TestTASFlavorCacheAddAndRemoveUsage(t *testing.T) {
 				cache.removeUsage(logr, wlKey)
 			},
 			wantUsage: map[utiltas.TopologyDomainID]resources.Requests{},
+		},
+		{
+			name: "full hostname path uses cluster-qualified hostname cache key",
+			operations: func(cache *TASFlavorCache) {
+				cache.topology.Levels = []string{constants.MultiKueueClusterLabel, corev1.LabelHostname}
+				cache.addUsage(logr, wlKey, []workload.TopologyDomainRequests{
+					{
+						Values:  []string{"worker1", "node-a"},
+						Cluster: "worker1",
+						Count:   2,
+						SinglePodRequests: resources.NewRequestsFromMap(map[corev1.ResourceName]int64{
+							corev1.ResourceCPU: 2,
+						}),
+					},
+				})
+			},
+			wantUsage: map[utiltas.TopologyDomainID]resources.Requests{
+				"worker1,node-a": resources.NewRequestsFromMap(map[corev1.ResourceName]int64{
+					corev1.ResourceCPU:  4,
+					corev1.ResourcePods: 2,
+				}),
+			},
 		},
 	}
 

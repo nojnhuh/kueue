@@ -38,6 +38,7 @@ import (
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/cache/hierarchy"
+	"sigs.k8s.io/kueue/pkg/constants"
 	tasindexer "sigs.k8s.io/kueue/pkg/controller/tas/indexer"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/resources"
@@ -1108,6 +1109,106 @@ func TestSnapshot(t *testing.T) {
 					}
 				}
 			}
+		})
+	}
+}
+
+func TestSnapshotWithFullHostnamePathUsage(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	cases := map[string]struct {
+		overlappingFlavors bool
+		usageOnly          bool
+	}{
+		"remove workload":                                {},
+		"remove workload usage":                          {usageOnly: true},
+		"remove workload with overlapping flavors":       {overlappingFlavors: true},
+		"remove workload usage with overlapping flavors": {overlappingFlavors: true, usageOnly: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			features.SetFeatureGateDuringTest(t, features.TopologyAwareScheduling, true)
+			features.SetFeatureGateDuringTest(t, features.TASHandleOverlappingFlavors, tc.overlappingFlavors)
+			ctx, log := utiltesting.ContextWithLog(t)
+			cache := New(utiltesting.NewFakeClient())
+			levels := []string{constants.MultiKueueClusterLabel, corev1.LabelHostname}
+			cache.AddOrUpdateTopology(log, utiltestingapi.MakeTopology("topology").Levels(levels...).Obj())
+			cache.AddOrUpdateTopology(log, utiltestingapi.MakeTopology("other-topology").
+				Levels(constants.MultiKueueClusterLabel, "zone", corev1.LabelHostname).Obj())
+			cache.AddOrUpdateResourceFlavor(log, utiltestingapi.MakeResourceFlavor("tas-victim").TopologyName("topology").Obj())
+			cache.AddOrUpdateResourceFlavor(log, utiltestingapi.MakeResourceFlavor("tas-sibling").TopologyName("other-topology").Obj())
+			cq := utiltestingapi.MakeClusterQueue("cq").ResourceGroup(
+				*utiltestingapi.MakeFlavorQuotas("tas-victim").Resource(corev1.ResourceCPU, "2").Obj(),
+				*utiltestingapi.MakeFlavorQuotas("tas-sibling").Resource(corev1.ResourceCPU, "2").Obj(),
+			).Obj()
+			if err := cache.AddClusterQueue(ctx, cq); err != nil {
+				t.Fatalf("Failed adding ClusterQueue: %v", err)
+			}
+			for _, cluster := range []string{"worker1", "worker2"} {
+				cache.TASCache().SyncNode(node.MakeNode("node-a").
+					Label(constants.MultiKueueClusterLabel, cluster).
+					Label("zone", "zone-a").
+					Label(corev1.LabelHostname, "node-a").
+					StatusAllocatable(corev1.ResourceList{
+						corev1.ResourceCPU:  resource.MustParse("2"),
+						corev1.ResourcePods: resource.MustParse("10"),
+					}).Ready().Obj())
+			}
+			victim := utiltestingapi.MakeWorkload("victim", "").
+				PodSets(*utiltestingapi.MakePodSet("main", 1).
+					RequiredTopologyRequest(corev1.LabelHostname).
+					Request(corev1.ResourceCPU, "1").Obj()).
+				ReserveQuotaAt(utiltestingapi.MakeAdmission("cq").
+					PodSets(utiltestingapi.MakePodSetAssignment("main").
+						Assignment(corev1.ResourceCPU, "tas-victim", "1").
+						TopologyAssignment(utiltestingapi.MakeTopologyAssignment(levels).
+							Domain(utiltestingapi.MakeTopologyDomainAssignment([]string{"worker1", "node-a"}, 1).Obj()).
+							Obj()).Obj()).Obj(), now).
+				AdmittedAt(true, now).
+				Obj()
+			cache.AddOrUpdateWorkload(ctx, log, victim)
+			snapshot, err := cache.Snapshot(ctx)
+			if err != nil {
+				t.Fatalf("unexpected error while building snapshot: %v", err)
+			}
+			cqSnapshot := snapshot.ClusterQueue("cq")
+			incomingUsage := workload.TASFlavorUsage{{
+				Values:            []string{"worker1", "node-a"},
+				Cluster:           "worker1",
+				SinglePodRequests: resources.NewRequestsFromMap(map[corev1.ResourceName]int64{corev1.ResourceCPU: 2000}),
+				Count:             1,
+			}}
+			assertFits := func(want bool) {
+				t.Helper()
+				for _, flavor := range []kueue.ResourceFlavorReference{"tas-victim", "tas-sibling"} {
+					if flavor == "tas-sibling" && !tc.overlappingFlavors {
+						continue
+					}
+					tasSnapshot := cqSnapshot.TASFlavors[flavor]
+					if tasSnapshot == nil {
+						t.Fatalf("flavor %q is missing from the snapshot", flavor)
+					}
+					if got := tasSnapshot.Fits(incomingUsage); got != want {
+						t.Errorf("Fits() for flavor %q = %t, want %t", flavor, got, want)
+					}
+					otherWorkerUsage := slices.Clone(incomingUsage)
+					otherWorkerUsage[0].Cluster = "worker2"
+					otherWorkerUsage[0].Values = []string{"worker2", "node-a"}
+					if !tasSnapshot.Fits(otherWorkerUsage) {
+						t.Errorf("usage on worker1 affected the same hostname on worker2 for flavor %q", flavor)
+					}
+				}
+			}
+			assertFits(false)
+			victims := []*workload.Info{cqSnapshot.Workloads[workload.Key(victim)]}
+			var revert func()
+			if tc.usageOnly {
+				revert = snapshot.SimulateWorkloadUsageRemoval(victims)
+			} else {
+				revert = snapshot.SimulateWorkloadRemoval(victims)
+			}
+			assertFits(true)
+			revert()
+			assertFits(false)
 		})
 	}
 }
